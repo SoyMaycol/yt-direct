@@ -1,4 +1,6 @@
 const fs = require('node:fs');
+const https = require('node:https');
+const { URL } = require('node:url');
 const { head, stream } = require('../core/Client');
 const { NetworkError } = require('../core/Errors');
 
@@ -53,8 +55,9 @@ function getContentLength(url) {
   });
 }
 
-function simpleDownload(url, filePath, onProgress) {
+function simpleDownload(url, filePath, onProgress, redirects = 0) {
   return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new NetworkError('Too many redirects'));
     const u = new URL(url);
     const req = https.get({
       hostname: u.hostname,
@@ -64,6 +67,10 @@ function simpleDownload(url, filePath, onProgress) {
         'Referer': 'https://www.youtube.com/',
       },
     }, (res) => {
+      if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
+        res.resume();
+        return resolve(simpleDownload(res.headers.location, filePath, onProgress, redirects + 1));
+      }
       if (res.statusCode !== 200) {
         return reject(new NetworkError(`Download failed with HTTP ${res.statusCode}`));
       }
@@ -112,8 +119,9 @@ function parallelDownload(url, filePath, totalSize, concurrency, chunkSize, onPr
   });
 }
 
-function downloadChunk(url, start, end, index, total) {
+function downloadChunk(url, start, end, index, total, redirects = 0) {
   return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new NetworkError('Too many redirects'));
     const u = new URL(url);
     const req = https.get({
       hostname: u.hostname,
@@ -124,6 +132,10 @@ function downloadChunk(url, start, end, index, total) {
         'Range': `bytes=${start}-${end}`,
       },
     }, (res) => {
+      if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
+        res.resume();
+        return resolve(downloadChunk(res.headers.location, start, end, index, total, redirects + 1));
+      }
       if (res.statusCode !== 200 && res.statusCode !== 206) {
         return reject(new NetworkError(`Chunk HTTP ${res.statusCode}`));
       }

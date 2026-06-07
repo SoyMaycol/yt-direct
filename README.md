@@ -38,7 +38,10 @@ const ytdl = require('yt-direct');
 })();
 ```
 
-And don't worry, it is compatible with ESM
+And don't worry, it is compatible with ESM:
+```javascript
+import ytdl from 'yt-direct';
+```
 
 ---
 
@@ -234,10 +237,29 @@ console.log('Qualities:', ytdl.QUALITIES);
 
 ---
 
-## CLI Usage
+## Getting the Download URL (without downloading)
 
-```bash
-node -e "const ytdl=require('yt-direct'); (async()=>{const v=await ytdl('URL'); v.download('./v.mp4');})()"
+```javascript
+const ytdl = require('yt-direct');
+
+(async () => {
+  const video = await ytdl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
+    quality: '1080p',
+  });
+
+  console.log('Title:', video.title);
+  console.log('Video URL:', video.url);
+  if (video.audio) console.log('Audio URL:', video.audio.url);
+
+  // Use the URL directly with curl, wget, etc.
+})();
+```
+
+If you only need to inspect formats without selecting one:
+
+```javascript
+const info = await ytdl.getInfo('https://youtube.com/watch?v=xxx');
+console.log(info.formats);  // array of { itag, quality, container, codec, size, url }
 ```
 
 ---

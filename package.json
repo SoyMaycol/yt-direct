@@ -4,17 +4,7 @@
   "description": "Hello, I present to you a module to download YouTube videos directly",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
-  },
-  "files": [
-    "dist/",
-    "README.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "node build/build.js",
     "prepublishOnly": "npm run build",
@@ -45,6 +35,5 @@
     "url": "https://github.com/SoyMaycol/yt-direct/issues"
   },
   "homepage": "https://github.com/SoyMaycol/yt-direct#readme",
-  "author": "SoyMaycol",
-  "funding": []
+  "author": "SoyMaycol"
 }

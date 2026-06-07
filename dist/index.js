@@ -1,12 +1,7 @@
-/*!
- * yt-direct v1.0.0
- * Direct YouTube video downloader — InnerTube API
- * https://github.com/user/yt-direct#readme
- * License: MIT
- */
-// ── index.js ──
-// ── core/InnerTube.js ──
-// ── core/Client.js ──
+/*! yt-direct v1.0.0 */
+// index.js
+// core/InnerTube.js
+// core/Client.js
 const https = require('node:https');
 const zlib = require('node:zlib');
 const { URL } = require('node:url');
@@ -108,7 +103,7 @@ function stream(url) {
 
 module.exports = { request, head, stream, buildOptions, UA, API_KEY, HOST, PATH };
 
-// ── core/Errors.js ──
+// core/Errors.js
 class YouTubeError extends Error {
   constructor(message, code = 'YOUTUBE_ERROR', details = null) {
     super(message);
@@ -260,9 +255,9 @@ async function fetch(videoId) {
 
 module.exports = { fetch, CLIENT_PROFILES };
 
-// ── formats/Selector.js ──
-// ── formats/Format.js ──
-// ── formats/Registry.js ──
+// formats/Selector.js
+// formats/Format.js
+// formats/Registry.js
 const { FormatError } = require('../core/Errors');
 
 const ITAG_REGISTRY = {
@@ -444,7 +439,7 @@ class Format {
 
 module.exports = { Format };
 
-// ── formats/Qualities.js ──
+// formats/Qualities.js
 const { QualityError } = require('../core/Errors');
 
 const QUALITY_MAP = {
@@ -504,7 +499,7 @@ module.exports = {
   validateQuality,
 };
 
-// ── formats/mime.js ──
+// formats/mime.js
 const { resolveContainer, requiresConversion } = require('./Registry');
 
 function mimeTypeToContainer(mimeType) {
@@ -729,7 +724,7 @@ class FormatSelector {
 
 module.exports = { FormatSelector };
 
-// ── utils/validators.js ──
+// utils/validators.js
 const { ValidationError } = require('../core/Errors');
 
 const VALID_QUALITIES = ['4320p', '2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p', 'auto', 'best', 'audio'];
@@ -773,7 +768,7 @@ function validateOptions(options = {}) {
 
 module.exports = { validateOptions, VALID_QUALITIES, VALID_CONTAINERS };
 
-// ── utils/url.js ──
+// utils/url.js
 const { URL } = require('node:url');
 
 function extractVideoId(input) {
@@ -810,7 +805,7 @@ function isValidVideoId(id) {
 
 module.exports = { extractVideoId, isValidVideoId };
 
-// ── download/Merge.js ──
+// download/Merge.js
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const { MergeError } = require('../core/Errors');
@@ -917,8 +912,10 @@ module.exports = {
   TOOLS,
 };
 
-// ── download/Downloader.js ──
+// download/Downloader.js
 const fs = require('node:fs');
+const https = require('node:https');
+const { URL } = require('node:url');
 const { head, stream } = require('../core/Client');
 const { NetworkError } = require('../core/Errors');
 
@@ -973,8 +970,9 @@ function getContentLength(url) {
   });
 }
 
-function simpleDownload(url, filePath, onProgress) {
+function simpleDownload(url, filePath, onProgress, redirects = 0) {
   return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new NetworkError('Too many redirects'));
     const u = new URL(url);
     const req = https.get({
       hostname: u.hostname,
@@ -984,6 +982,10 @@ function simpleDownload(url, filePath, onProgress) {
         'Referer': 'https://www.youtube.com/',
       },
     }, (res) => {
+      if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
+        res.resume();
+        return resolve(simpleDownload(res.headers.location, filePath, onProgress, redirects + 1));
+      }
       if (res.statusCode !== 200) {
         return reject(new NetworkError(`Download failed with HTTP ${res.statusCode}`));
       }
@@ -1032,8 +1034,9 @@ function parallelDownload(url, filePath, totalSize, concurrency, chunkSize, onPr
   });
 }
 
-function downloadChunk(url, start, end, index, total) {
+function downloadChunk(url, start, end, index, total, redirects = 0) {
   return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new NetworkError('Too many redirects'));
     const u = new URL(url);
     const req = https.get({
       hostname: u.hostname,
@@ -1044,6 +1047,10 @@ function downloadChunk(url, start, end, index, total) {
         'Range': `bytes=${start}-${end}`,
       },
     }, (res) => {
+      if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
+        res.resume();
+        return resolve(downloadChunk(res.headers.location, start, end, index, total, redirects + 1));
+      }
       if (res.statusCode !== 200 && res.statusCode !== 206) {
         return reject(new NetworkError(`Chunk HTTP ${res.statusCode}`));
       }
@@ -1063,7 +1070,7 @@ module.exports = {
   getContentLength,
 };
 
-// ── download/Stream.js ──
+// download/Stream.js
 const { Transform } = require('node:stream');
 const { createReadStream } = require('./Downloader');
 
@@ -1119,25 +1126,15 @@ function createStream(url, options = {}) {
 
 module.exports = { DownloadStream, createStream };
 
-// ── utils/constants.js ──
-// ── ../package.json ──
+// utils/constants.js
+// ../package.json
 {
   "name": "yt-direct",
   "version": "1.0.0",
-  "description": "Direct YouTube video downloader — InnerTube API, no external dependencies, quality & format selection, FFmpeg merge support.",
+  "description": "Hello, I present to you a module to download YouTube videos directly",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
-  },
-  "files": [
-    "dist/",
-    "README.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "node build/build.js",
     "prepublishOnly": "npm run build",
@@ -1162,14 +1159,13 @@ module.exports = { DownloadStream, createStream };
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/yt-direct.git"
+    "url": "https://github.com/SoyMaycol/yt-direct.git"
   },
   "bugs": {
-    "url": "https://github.com/user/yt-direct/issues"
+    "url": "https://github.com/SoyMaycol/yt-direct/issues"
   },
-  "homepage": "https://github.com/user/yt-direct#readme",
-  "author": "yt-direct contributors",
-  "funding": []
+  "homepage": "https://github.com/SoyMaycol/yt-direct#readme",
+  "author": "SoyMaycol"
 }
 
 const pkg = require('../../package.json');
