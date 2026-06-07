@@ -1,0 +1,50 @@
+{
+  "name": "yt-direct",
+  "version": "1.0.0",
+  "description": "Hello, I present to you a module to download YouTube videos directly",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build/build.js",
+    "prepublishOnly": "npm run build",
+    "test": "node test/basic.js",
+    "example": "node examples/basic.js"
+  },
+  "keywords": [
+    "youtube",
+    "download",
+    "video",
+    "yt-dlp",
+    "innertube",
+    "downloader",
+    "ytdl",
+    "mp4",
+    "stream",
+    "no-dependencies"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SoyMaycol/yt-direct.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SoyMaycol/yt-direct/issues"
+  },
+  "homepage": "https://github.com/SoyMaycol/yt-direct#readme",
+  "author": "SoyMaycol",
+  "funding": []
+}
