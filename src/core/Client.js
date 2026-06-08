@@ -8,29 +8,8 @@ const HOST = 'www.youtube.com';
 const PATH = '/youtubei/v1/player';
 const TIMEOUT = 20000;
 
-function buildOptions(videoId) {
-  return JSON.stringify({
-    context: {
-      client: {
-        clientName: 'ANDROID',
-        clientVersion: '20.10.38',
-        androidSdkVersion: 30,
-        osName: 'Android',
-        osVersion: '11',
-        userAgent: UA,
-        hl: 'en',
-        gl: 'US',
-      },
-    },
-    videoId,
-    contentCheckOk: true,
-    racyCheckOk: true,
-  });
-}
-
-function request(payload) {
+function request(body) {
   return new Promise((resolve, reject) => {
-    const body = typeof payload === 'string' ? payload : buildOptions(payload);
     const opts = {
       hostname: HOST,
       path: `${PATH}?key=${API_KEY}`,
@@ -54,7 +33,11 @@ function request(payload) {
         if (res.statusCode !== 200) {
           return reject(new Error(`YouTube API returned HTTP ${res.statusCode}`));
         }
-        resolve(JSON.parse(buf.toString('utf8')));
+        try {
+          resolve(JSON.parse(buf.toString('utf8')));
+        } catch (e) {
+          reject(new Error('Invalid JSON from YouTube API: ' + e.message));
+        }
       });
     });
     req.on('error', reject);
@@ -87,7 +70,7 @@ function head(url) {
 
 function stream(url) {
   const u = new URL(url);
-  return https.get({
+  const req = https.get({
     hostname: u.hostname,
     path: u.pathname + u.search,
     headers: {
@@ -95,6 +78,8 @@ function stream(url) {
       'Referer': 'https://www.youtube.com/',
     },
   });
+  req.setTimeout(30000);
+  return req;
 }
 
-module.exports = { request, head, stream, buildOptions, UA, API_KEY, HOST, PATH };
+module.exports = { request, head, stream };

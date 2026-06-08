@@ -1,7 +1,9 @@
 const { ValidationError } = require('../core/Errors');
+const { QUALITY_TIERS } = require('../formats/Qualities');
+const { CONTAINER_MAP } = require('../formats/Registry');
 
-const VALID_QUALITIES = ['4320p', '2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p', 'auto', 'best', 'audio'];
-const VALID_CONTAINERS = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'm4a', 'aac', 'flac', 'ogg', 'mp3', 'wav'];
+const VALID_QUALITIES = [...QUALITY_TIERS, 'auto', 'best', 'audio'];
+const VALID_CONTAINERS = Object.keys(CONTAINER_MAP);
 
 function validateOptions(options = {}) {
   const errors = [];

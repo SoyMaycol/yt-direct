@@ -1,6 +1,6 @@
 {
   "name": "yt-direct",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Hello, I present to you a module to download YouTube videos directly",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

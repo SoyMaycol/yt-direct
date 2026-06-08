@@ -45,7 +45,6 @@ function createStream(url, options = {}) {
   const source = createReadStream(url);
 
   source.on('error', (err) => transform.destroy(err));
-  source.on('response', () => {});
   source.pipe(transform);
 
   return transform;

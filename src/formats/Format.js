@@ -1,4 +1,4 @@
-const { getItagMeta, resolveContainer } = require('./Registry');
+const { getItagMeta } = require('./Registry');
 
 class Format {
   #raw;

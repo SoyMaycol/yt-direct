@@ -1,8 +1,6 @@
 const { fetch } = require('./core/InnerTube');
-const { head } = require('./core/Client');
-const { YouTubeError, FormatError, ValidationError } = require('./core/Errors');
+const { YouTubeError, FormatError, ValidationError, QualityError, MergeError, NetworkError } = require('./core/Errors');
 const { FormatSelector } = require('./formats/Selector');
-const { Format } = require('./formats/Format');
 const { resolveContainer, requiresConversion, QUALITY_TIERS, CONTAINER_MAP } = require('./formats/Registry');
 const { validateOptions } = require('./utils/validators');
 const { extractVideoId } = require('./utils/url');
@@ -51,9 +49,10 @@ function ytdl(input, options = {}) {
     if (normalized.merge && audio) {
       response.merge = async (outputPath) => {
         if (!outputPath) {
-          const ext = normalized.format || 'mkv';
+          const ext = normalized.format || 'mp4';
           outputPath = `${sanitize(info.title || 'video')}.${ext}`;
         }
+        const fs = require('node:fs');
         const tmpVideo = `/tmp/yt-direct-${format.itag}-video`;
         const tmpAudio = `/tmp/yt-direct-${audio.itag}-audio`;
         try {
@@ -64,8 +63,8 @@ function ytdl(input, options = {}) {
           await merge(tmpVideo, tmpAudio, outputPath, normalized.merge);
           return outputPath;
         } finally {
-          try { require('node:fs').unlinkSync(tmpVideo); } catch {}
-          try { require('node:fs').unlinkSync(tmpAudio); } catch {}
+          try { fs.unlinkSync(tmpVideo); } catch {}
+          try { fs.unlinkSync(tmpAudio); } catch {}
         }
       };
     }
@@ -84,7 +83,7 @@ async function getInfo(input) {
   return {
     id: videoId,
     title: result.videoDetails.title || 'Unknown',
-    author: result.videoDetails.author || result.videoDetails?.channelId || null,
+    author: result.videoDetails.author || result.videoDetails.channelId || null,
     duration: parseInt(result.videoDetails.lengthSeconds || '0', 10),
     thumbnails: result.videoDetails.thumbnail?.thumbnails || [],
     description: result.videoDetails.shortDescription || '',
@@ -107,12 +106,14 @@ ytdl.getFormats = (input) => getInfo(input).then((i) => i.formats);
 ytdl.verifyURL = verify;
 ytdl.createStream = createStream;
 ytdl.version = VERSION;
-
 ytdl.FORMATS = Object.keys(CONTAINER_MAP);
 ytdl.QUALITIES = [...QUALITY_TIERS, 'auto', 'best', 'audio'];
-ytdl.FormatError = FormatError;
 ytdl.YouTubeError = YouTubeError;
+ytdl.FormatError = FormatError;
 ytdl.ValidationError = ValidationError;
+ytdl.QualityError = QualityError;
+ytdl.MergeError = MergeError;
+ytdl.NetworkError = NetworkError;
 
 module.exports = ytdl;
 module.exports.default = ytdl;

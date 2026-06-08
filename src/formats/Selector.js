@@ -1,8 +1,7 @@
 const { Format } = require('./Format');
 const { getFallbackChain, matchQualityRank, toHeight, validateQuality } = require('./Qualities');
 const { checkContainer, mimeTypeToContainer } = require('./mime');
-const { requiresConversion } = require('./Registry');
-const { FormatError, QualityError } = require('../core/Errors');
+const { FormatError } = require('../core/Errors');
 
 class FormatSelector {
   #combined;
@@ -44,7 +43,7 @@ class FormatSelector {
 
   select(options = {}) {
     const quality = validateQuality(options.quality || 'auto');
-    const container = options.format || options.container || null;
+    const container = options.format || null;
 
     if (quality === 'audio') {
       return this.#selectAudio(options);
@@ -129,7 +128,7 @@ class FormatSelector {
   }
 
   #selectAudio(options) {
-    const container = options.format || options.container || null;
+    const container = options.format || null;
     const audios = this.#all
       .filter((f) => f.isAudio && f.hasUrl)
       .sort((a, b) => b.bitrate - a.bitrate);

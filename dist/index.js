@@ -1,165 +1,134 @@
-/*! yt-direct v1.0.0 */
-// index.js
-// core/InnerTube.js
-// core/Client.js
-const https = require('node:https');
-const zlib = require('node:zlib');
-const { URL } = require('node:url');
+/*! yt-direct v1.0.0 | MIT */
 
-const UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip';
-const API_KEY = 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
-const HOST = 'www.youtube.com';
-const PATH = '/youtubei/v1/player';
-const TIMEOUT = 20000;
+(function(){
+'use strict';
 
-function buildOptions(videoId) {
-  return JSON.stringify({
-    context: {
-      client: {
-        clientName: 'ANDROID',
-        clientVersion: '20.10.38',
-        androidSdkVersion: 30,
-        osName: 'Android',
-        osVersion: '11',
-        userAgent: UA,
-        hl: 'en',
-        gl: 'US',
-      },
-    },
-    videoId,
-    contentCheckOk: true,
-    racyCheckOk: true,
-  });
-}
+const __m = {
+"index":[function(module,exports,__r__){
+const { fetch } = __r__('core/InnerTube');
+const { YouTubeError, FormatError, ValidationError, QualityError, MergeError, NetworkError } = __r__('core/Errors');
+const { FormatSelector } = __r__('formats/Selector');
+const { resolveContainer, requiresConversion, QUALITY_TIERS, CONTAINER_MAP } = __r__('formats/Registry');
+const { validateOptions } = __r__('utils/validators');
+const { extractVideoId } = __r__('utils/url');
+const { merge } = __r__('download/Merge');
+const { downloadToFile, createReadStream, verify } = __r__('download/Downloader');
+const { createStream } = __r__('download/Stream');
+const { VERSION } = __r__('utils/constants');
 
-function request(payload) {
-  return new Promise((resolve, reject) => {
-    const body = typeof payload === 'string' ? payload : buildOptions(payload);
-    const opts = {
-      hostname: HOST,
-      path: `${PATH}?key=${API_KEY}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': UA,
-        'Content-Length': Buffer.byteLength(body),
-        'Accept-Encoding': 'gzip',
-        'Origin': `https://${HOST}`,
+function ytdl(input, options = {}) {
+  const videoId = extractVideoId(input);
+  if (!videoId) {
+    return Promise.reject(new ValidationError(`Invalid YouTube URL or video ID: "${input}"`));
+  }
+
+  const normalized = validateOptions(options);
+
+  return (async () => {
+    const info = await getInfo(videoId);
+    const selector = new FormatSelector(info.streamingData);
+    const selected = selector.select(normalized);
+
+    const format = selected.format;
+    const audio = selected.audio || null;
+
+    const response = {
+      videoId,
+      title: info.title || 'video',
+      url: format.url,
+      format,
+      audio,
+      type: selected.type,
+      stream: () => createStream(format.url),
+      pipe: (writable) => createStream(format.url).pipe(writable),
+      download: async (filePath) => {
+        if (!filePath) {
+          const ext = normalized.format || format.container || 'mp4';
+          filePath = `${sanitize(info.title || 'video')}.${ext}`;
+        }
+        return downloadToFile(format.url, filePath, {
+          concurrency: normalized.concurrency,
+          onProgress: normalized.onProgress,
+        });
       },
     };
-    const req = https.request(opts, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        let buf = Buffer.concat(chunks);
-        if (res.headers['content-encoding'] === 'gzip') {
-          try { buf = zlib.gunzipSync(buf); } catch {}
+
+    if (normalized.merge && audio) {
+      response.merge = async (outputPath) => {
+        if (!outputPath) {
+          const ext = normalized.format || 'mp4';
+          outputPath = `${sanitize(info.title || 'video')}.${ext}`;
         }
-        if (res.statusCode !== 200) {
-          return reject(new Error(`YouTube API returned HTTP ${res.statusCode}`));
+        const fs = require('node:fs');
+        const tmpVideo = `/tmp/yt-direct-${format.itag}-video`;
+        const tmpAudio = `/tmp/yt-direct-${audio.itag}-audio`;
+        try {
+          await Promise.all([
+            downloadToFile(format.url, tmpVideo),
+            downloadToFile(audio.url, tmpAudio),
+          ]);
+          await merge(tmpVideo, tmpAudio, outputPath, normalized.merge);
+          return outputPath;
+        } finally {
+          try { fs.unlinkSync(tmpVideo); } catch {}
+          try { fs.unlinkSync(tmpAudio); } catch {}
         }
-        resolve(JSON.parse(buf.toString('utf8')));
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(TIMEOUT, () => { req.destroy(new Error('YouTube API request timed out')); });
-    req.write(body);
-    req.end();
-  });
+      };
+    }
+
+    return response;
+  })();
 }
 
-function head(url) {
-  return new Promise((resolve) => {
-    let u;
-    try { u = new URL(url); } catch { resolve(false); return; }
-    const req = https.get({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Range': 'bytes=0-0',
-      },
-    }, (res) => {
-      resolve(res.statusCode === 206 || res.statusCode === 200);
-      res.resume();
-    });
-    req.on('error', () => resolve(false));
-    req.setTimeout(8000, () => { req.destroy(); resolve(false); });
-  });
+async function getInfo(input) {
+  const videoId = extractVideoId(input);
+  if (!videoId) throw new ValidationError(`Invalid YouTube URL or video ID: "${input}"`);
+
+  const result = await fetch(videoId);
+  const selector = new FormatSelector(result.streamingData);
+
+  return {
+    id: videoId,
+    title: result.videoDetails.title || 'Unknown',
+    author: result.videoDetails.author || result.videoDetails.channelId || null,
+    duration: parseInt(result.videoDetails.lengthSeconds || '0', 10),
+    thumbnails: result.videoDetails.thumbnail?.thumbnails || [],
+    description: result.videoDetails.shortDescription || '',
+    viewCount: parseInt(result.videoDetails.viewCount || '0', 10),
+    isLive: result.videoDetails.isLive === true,
+    streamingData: result.streamingData,
+    formats: selector.list(),
+    combined: selector.combined.map((f) => f.toJSON()),
+    adaptive: selector.adaptive.map((f) => f.toJSON()),
+    clientUsed: result.clientUsed,
+  };
 }
 
-function stream(url) {
-  const u = new URL(url);
-  return https.get({
-    hostname: u.hostname,
-    path: u.pathname + u.search,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Referer': 'https://www.youtube.com/',
-    },
-  });
+function sanitize(name) {
+  return String(name || 'video').replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim() || 'video';
 }
 
-module.exports = { request, head, stream, buildOptions, UA, API_KEY, HOST, PATH };
+ytdl.getInfo = getInfo;
+ytdl.getFormats = (input) => getInfo(input).then((i) => i.formats);
+ytdl.verifyURL = verify;
+ytdl.createStream = createStream;
+ytdl.version = VERSION;
+ytdl.FORMATS = Object.keys(CONTAINER_MAP);
+ytdl.QUALITIES = [...QUALITY_TIERS, 'auto', 'best', 'audio'];
+ytdl.YouTubeError = YouTubeError;
+ytdl.FormatError = FormatError;
+ytdl.ValidationError = ValidationError;
+ytdl.QualityError = QualityError;
+ytdl.MergeError = MergeError;
+ytdl.NetworkError = NetworkError;
 
-// core/Errors.js
-class YouTubeError extends Error {
-  constructor(message, code = 'YOUTUBE_ERROR', details = null) {
-    super(message);
-    this.name = 'YouTubeError';
-    this.code = code;
-    this.details = details;
-    Error.captureStackTrace(this, this.constructor);
-  }
-}
+module.exports = ytdl;
+module.exports.default = ytdl;
 
-class FormatError extends YouTubeError {
-  constructor(message, details = null) {
-    super(message, 'FORMAT_ERROR', details);
-    this.name = 'FormatError';
-  }
-}
-
-class QualityError extends YouTubeError {
-  constructor(message, details = null) {
-    super(message, 'QUALITY_ERROR', details);
-    this.name = 'QualityError';
-  }
-}
-
-class MergeError extends YouTubeError {
-  constructor(message, details = null) {
-    super(message, 'MERGE_ERROR', details);
-    this.name = 'MergeError';
-  }
-}
-
-class NetworkError extends YouTubeError {
-  constructor(message, details = null) {
-    super(message, 'NETWORK_ERROR', details);
-    this.name = 'NetworkError';
-  }
-}
-
-class ValidationError extends YouTubeError {
-  constructor(message, details = null) {
-    super(message, 'VALIDATION_ERROR', details);
-    this.name = 'ValidationError';
-  }
-}
-
-module.exports = {
-  YouTubeError,
-  FormatError,
-  QualityError,
-  MergeError,
-  NetworkError,
-  ValidationError,
-};
-
-const { request } = require('./Client');
-const { YouTubeError } = require('./Errors');
+},["core/InnerTube","core/Errors","formats/Selector","formats/Registry","utils/validators","utils/url","download/Merge","download/Downloader","download/Stream","utils/constants"]],
+"core/InnerTube":[function(module,exports,__r__){
+const { request } = __r__('core/Client');
+const { YouTubeError } = __r__('core/Errors');
 
 const CLIENT_PROFILES = [
   {
@@ -255,10 +224,250 @@ async function fetch(videoId) {
 
 module.exports = { fetch, CLIENT_PROFILES };
 
-// formats/Selector.js
-// formats/Format.js
-// formats/Registry.js
-const { FormatError } = require('../core/Errors');
+},["core/Client","core/Errors"]],
+"core/Errors":[function(module,exports,__r__){
+class YouTubeError extends Error {
+  constructor(message, code = 'YOUTUBE_ERROR', details = null) {
+    super(message);
+    this.name = 'YouTubeError';
+    this.code = code;
+    this.details = details;
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+class FormatError extends YouTubeError {
+  constructor(message, details = null) {
+    super(message, 'FORMAT_ERROR', details);
+    this.name = 'FormatError';
+  }
+}
+
+class QualityError extends YouTubeError {
+  constructor(message, details = null) {
+    super(message, 'QUALITY_ERROR', details);
+    this.name = 'QualityError';
+  }
+}
+
+class MergeError extends YouTubeError {
+  constructor(message, details = null) {
+    super(message, 'MERGE_ERROR', details);
+    this.name = 'MergeError';
+  }
+}
+
+class NetworkError extends YouTubeError {
+  constructor(message, details = null) {
+    super(message, 'NETWORK_ERROR', details);
+    this.name = 'NetworkError';
+  }
+}
+
+class ValidationError extends YouTubeError {
+  constructor(message, details = null) {
+    super(message, 'VALIDATION_ERROR', details);
+    this.name = 'ValidationError';
+  }
+}
+
+module.exports = {
+  YouTubeError,
+  FormatError,
+  QualityError,
+  MergeError,
+  NetworkError,
+  ValidationError,
+};
+
+},[]],
+"formats/Selector":[function(module,exports,__r__){
+const { Format } = __r__('formats/Format');
+const { getFallbackChain, matchQualityRank, toHeight, validateQuality } = __r__('formats/Qualities');
+const { checkContainer, mimeTypeToContainer } = __r__('formats/mime');
+const { FormatError } = __r__('core/Errors');
+
+class FormatSelector {
+  #combined;
+  #adaptive;
+  #all;
+
+  constructor(streamingData) {
+    this.#combined = (streamingData.formats || []).map((f) => new Format({ ...f, _source: 'combined' }));
+    this.#adaptive = (streamingData.adaptiveFormats || []).map((f) => new Format({ ...f, _source: 'adaptive' }));
+    this.#all = [...this.#combined, ...this.#adaptive];
+  }
+
+  get formats() {
+    return [...this.#all];
+  }
+
+  get combined() {
+    return [...this.#combined];
+  }
+
+  get adaptive() {
+    return [...this.#adaptive];
+  }
+
+  list(options = {}) {
+    let list = [...this.#all];
+
+    if (options.type === 'video') list = list.filter((f) => f.isVideo);
+    else if (options.type === 'audio') list = list.filter((f) => f.isAudio);
+    else if (options.type === 'combined') list = list.filter((f) => f.isCombined);
+
+    if (options.minHeight) list = list.filter((f) => f.height >= options.minHeight);
+    if (options.minBitrate) list = list.filter((f) => f.bitrate >= options.minBitrate);
+    if (options.container) list = list.filter((f) => f.container === options.container);
+    if (options.codec) list = list.filter((f) => f.codec.toLowerCase().includes(options.codec.toLowerCase()));
+
+    return list.map((f) => f.toJSON());
+  }
+
+  select(options = {}) {
+    const quality = validateQuality(options.quality || 'auto');
+    const container = options.format || null;
+
+    if (quality === 'audio') {
+      return this.#selectAudio(options);
+    }
+
+    const chain = getFallbackChain(quality);
+
+    for (const q of chain) {
+      const targetH = toHeight(q);
+      const result = this.#tryQuality(targetH, container, options);
+      if (result) return result;
+    }
+
+    return this.#lastResort(container, options);
+  }
+
+  #tryQuality(targetH, container, options) {
+    const preferMp4 = options.preferMp4 !== false;
+
+    let candidates = this.#combined
+      .filter((f) => f.hasUrl && matchQualityRank(f, targetH))
+      .sort(this.#sortFn(preferMp4));
+
+    if (candidates.length) {
+      const picked = candidates[0];
+      const cc = container ? checkContainer(picked, container) : null;
+
+      if (container && cc && cc.needsConversion && !options.merge) {
+        throw new FormatError(
+          `Format "${container}" requires a merge/convert tool for itag ${picked.itag} (${picked.qualityLabel}, ${picked.container}). ` +
+          `Available source: ${picked.container}. Use { merge: { tool: 'ffmpeg', output: 'file.${container}' } } to convert.`,
+          {
+            itag: picked.itag,
+            sourceContainer: picked.container,
+            targetContainer: container,
+            requiresConversion: true,
+            suggestedTool: 'ffmpeg',
+          }
+        );
+      }
+
+      return { format: picked, type: 'combined' };
+    }
+
+    const videos = this.#adaptive
+      .filter((f) => f.isVideo && f.hasUrl && matchQualityRank(f, targetH))
+      .sort(this.#sortFn(preferMp4));
+
+    if (videos.length) {
+      const video = videos[0];
+      const audios = this.#adaptive
+        .filter((f) => f.isAudio && f.hasUrl)
+        .sort((a, b) => b.bitrate - a.bitrate);
+
+      const cc = container ? checkContainer(video, container) : null;
+
+      if (container && cc && cc.needsConversion && !options.merge) {
+        throw new FormatError(
+          `Format "${container}" requires a merge/convert tool. ` +
+          `Source: ${video.container}. Use { merge: { tool: 'ffmpeg', output: 'file.${container}' } }.`,
+          {
+            itag: video.itag,
+            sourceContainer: video.container,
+            targetContainer: container,
+            requiresConversion: true,
+            suggestedTool: 'ffmpeg',
+          }
+        );
+      }
+
+      const result = { format: video, type: 'video-only' };
+
+      if (audios.length) {
+        result.audio = audios[0];
+        result.type = 'separate';
+      }
+
+      return result;
+    }
+
+    return null;
+  }
+
+  #selectAudio(options) {
+    const container = options.format || null;
+    const audios = this.#all
+      .filter((f) => f.isAudio && f.hasUrl)
+      .sort((a, b) => b.bitrate - a.bitrate);
+
+    if (!audios.length) throw new FormatError('No audio formats available');
+
+    if (container) {
+      const match = audios.find((f) => f.container === container);
+      if (match) return { format: match, type: 'audio', audio: null };
+
+      const best = audios[0];
+      throw new FormatError(
+        `No audio format in "${container}" available. Best available: ${best.container} (${best.qualityLabel}). ` +
+        `Use { merge: { tool: 'ffmpeg', output: 'file.${container}' } } to convert.`,
+        {
+          sourceContainer: best.container,
+          targetContainer: container,
+          requiresConversion: true,
+          suggestedTool: 'ffmpeg',
+        }
+      );
+    }
+
+    return { format: audios[0], type: 'audio', audio: null };
+  }
+
+  #lastResort(container, options) {
+    if (this.#combined.length) {
+      return { format: this.#combined[0], type: 'combined' };
+    }
+    const video = this.#adaptive.find((f) => f.isVideo && f.hasUrl);
+    if (video) {
+      const audio = this.#adaptive.find((f) => f.isAudio && f.hasUrl);
+      return { format: video, type: audio ? 'separate' : 'video-only', audio };
+    }
+    throw new FormatError('No compatible formats found for this video');
+  }
+
+  #sortFn(preferMp4) {
+    return (a, b) => {
+      if (preferMp4) {
+        const aMp4 = a.container === 'mp4' ? 1 : 0;
+        const bMp4 = b.container === 'mp4' ? 1 : 0;
+        if (aMp4 !== bMp4) return bMp4 - aMp4;
+      }
+      return b.qualityRank - a.qualityRank;
+    };
+  }
+}
+
+module.exports = { FormatSelector };
+
+},["formats/Format","formats/Qualities","formats/mime","core/Errors"]],
+"formats/Registry":[function(module,exports,__r__){
+const { FormatError } = __r__('core/Errors');
 
 const ITAG_REGISTRY = {
   '18':  { quality: '360p',  container: 'mp4',  type: 'combined', codec: 'H.264 + AAC' },
@@ -372,363 +581,14 @@ module.exports = {
   isContainerSupported,
 };
 
-const { getItagMeta, resolveContainer } = require('./Registry');
+},["core/Errors"]],
+"utils/validators":[function(module,exports,__r__){
+const { ValidationError } = __r__('core/Errors');
+const { QUALITY_TIERS } = __r__('formats/Qualities');
+const { CONTAINER_MAP } = __r__('formats/Registry');
 
-class Format {
-  #raw;
-  #meta;
-
-  constructor(rawFormat) {
-    this.#raw = rawFormat;
-    this.#meta = getItagMeta(rawFormat.itag) || {};
-
-    this.itag = rawFormat.itag;
-    this.url = rawFormat.url || null;
-    this.mimeType = rawFormat.mimeType || '';
-    this.contentLength = rawFormat.contentLength ? Number(rawFormat.contentLength) : 0;
-    this.bitrate = rawFormat.bitrate || 0;
-    this.width = rawFormat.width || 0;
-    this.height = rawFormat.height || 0;
-    this.fps = rawFormat.fps || 0;
-    this.qualityLabel = rawFormat.qualityLabel || this.#meta.quality || null;
-    this.container = rawFormat.container || this.#meta.container || 'mp4';
-    this.codec = rawFormat.codecs || this.#meta.codec || 'unknown';
-    this.isAudio = this.mimeType.includes('audio');
-    this.isVideo = this.mimeType.includes('video');
-    this.isCombined = this.#meta.type === 'combined' || (this.isVideo && this.mimeType.includes('mp4a'));
-    this.source = rawFormat._source || 'adaptive';
-  }
-
-  get hasUrl() {
-    return !!this.url;
-  }
-
-  get sizeMB() {
-    return this.contentLength > 0 ? (this.contentLength / 1024 / 1024).toFixed(1) : '?';
-  }
-
-  get qualityRank() {
-    if (this.isAudio) return this.bitrate;
-    return (this.height || 0) * (this.width || 0);
-  }
-
-  toJSON() {
-    return {
-      itag: this.itag,
-      quality: this.qualityLabel,
-      container: this.container,
-      codec: this.codec,
-      size: this.sizeMB,
-      width: this.width,
-      height: this.height,
-      fps: this.fps,
-      bitrate: this.bitrate,
-      type: this.isCombined ? 'combined' : this.isAudio ? 'audio' : 'video',
-      hasUrl: this.hasUrl,
-    };
-  }
-
-  inspect() {
-    return `Format(${this.itag} | ${this.qualityLabel} | ${this.container} | ${this.codec})`;
-  }
-
-  [Symbol.for('nodejs.util.inspect.custom')]() {
-    return this.inspect();
-  }
-}
-
-module.exports = { Format };
-
-// formats/Qualities.js
-const { QualityError } = require('../core/Errors');
-
-const QUALITY_MAP = {
-  '4320p': 4320,
-  '2160p': 2160,
-  '1440p': 1440,
-  '1080p': 1080,
-  '720p': 720,
-  '480p': 480,
-  '360p': 360,
-  '240p': 240,
-  '144p': 144,
-};
-
-const QUALITY_TIERS = Object.keys(QUALITY_MAP);
-
-function toHeight(label) {
-  if (!label) return 0;
-  const cleaned = String(label).toLowerCase().replace(/[^0-9]/g, '');
-  const num = parseInt(cleaned, 10);
-  return isNaN(num) ? 0 : num;
-}
-
-function matchQualityRank(format, targetHeight, tolerance = 72) {
-  if (!targetHeight) return true;
-  const h = format.height || toHeight(format.qualityLabel);
-  if (!h) return false;
-  return Math.abs(h - targetHeight) <= tolerance;
-}
-
-function getFallbackChain(requested) {
-  const t = String(requested || '').toLowerCase();
-  if (t === 'auto' || t === 'best') return [...QUALITY_TIERS];
-  if (t === 'audio') return ['audio'];
-  const idx = QUALITY_TIERS.indexOf(t);
-  if (idx !== -1) return QUALITY_TIERS.slice(idx);
-  return [...QUALITY_TIERS];
-}
-
-function validateQuality(requested) {
-  if (!requested) return 'auto';
-  const t = String(requested).toLowerCase();
-  if (t === 'auto' || t === 'best' || t === 'audio') return t;
-  if (QUALITY_TIERS.includes(t)) return t;
-  throw new QualityError(
-    `Unsupported quality "${requested}". Available: ${QUALITY_TIERS.join(', ')}, auto, best, audio`,
-    { requested, supported: [...QUALITY_TIERS, 'auto', 'best', 'audio'] }
-  );
-}
-
-module.exports = {
-  QUALITY_MAP,
-  QUALITY_TIERS,
-  toHeight,
-  matchQualityRank,
-  getFallbackChain,
-  validateQuality,
-};
-
-// formats/mime.js
-const { resolveContainer, requiresConversion } = require('./Registry');
-
-function mimeTypeToContainer(mimeType) {
-  if (!mimeType) return 'mp4';
-  const parts = mimeType.split('/');
-  if (parts.length < 2) return 'mp4';
-  const sub = parts[1].split(';')[0].trim().toLowerCase();
-  const map = {
-    mp4: 'mp4',
-    webm: 'webm',
-    'x-matroska': 'mkv',
-    'x-msvideo': 'avi',
-    quicktime: 'mov',
-    aac: 'aac',
-    mpeg: 'mp3',
-    wav: 'wav',
-    ogg: 'ogg',
-    flac: 'flac',
-    '3gpp': '3gp',
-  };
-  return map[sub] || sub;
-}
-
-function checkContainer(format, targetContainer) {
-  const current = format.container || mimeTypeToContainer(format.mimeType);
-  if (!targetContainer) return { compatible: true, current, needsConversion: false };
-  const tc = resolveContainer(targetContainer);
-  if (!tc) return { compatible: false, current, target: targetContainer, needsConversion: false };
-  if (current === targetContainer) return { compatible: true, current, target: targetContainer, needsConversion: false };
-  return {
-    compatible: false,
-    current,
-    target: targetContainer,
-    needsConversion: true,
-    requiresTool: requiresConversion(format, targetContainer),
-  };
-}
-
-module.exports = { mimeTypeToContainer, checkContainer };
-
-const { Format } = require('./Format');
-const { getFallbackChain, matchQualityRank, toHeight, validateQuality } = require('./Qualities');
-const { checkContainer, mimeTypeToContainer } = require('./mime');
-const { requiresConversion } = require('./Registry');
-const { FormatError, QualityError } = require('../core/Errors');
-
-class FormatSelector {
-  #combined;
-  #adaptive;
-  #all;
-
-  constructor(streamingData) {
-    this.#combined = (streamingData.formats || []).map((f) => new Format({ ...f, _source: 'combined' }));
-    this.#adaptive = (streamingData.adaptiveFormats || []).map((f) => new Format({ ...f, _source: 'adaptive' }));
-    this.#all = [...this.#combined, ...this.#adaptive];
-  }
-
-  get formats() {
-    return [...this.#all];
-  }
-
-  get combined() {
-    return [...this.#combined];
-  }
-
-  get adaptive() {
-    return [...this.#adaptive];
-  }
-
-  list(options = {}) {
-    let list = [...this.#all];
-
-    if (options.type === 'video') list = list.filter((f) => f.isVideo);
-    else if (options.type === 'audio') list = list.filter((f) => f.isAudio);
-    else if (options.type === 'combined') list = list.filter((f) => f.isCombined);
-
-    if (options.minHeight) list = list.filter((f) => f.height >= options.minHeight);
-    if (options.minBitrate) list = list.filter((f) => f.bitrate >= options.minBitrate);
-    if (options.container) list = list.filter((f) => f.container === options.container);
-    if (options.codec) list = list.filter((f) => f.codec.toLowerCase().includes(options.codec.toLowerCase()));
-
-    return list.map((f) => f.toJSON());
-  }
-
-  select(options = {}) {
-    const quality = validateQuality(options.quality || 'auto');
-    const container = options.format || options.container || null;
-
-    if (quality === 'audio') {
-      return this.#selectAudio(options);
-    }
-
-    const chain = getFallbackChain(quality);
-
-    for (const q of chain) {
-      const targetH = toHeight(q);
-      const result = this.#tryQuality(targetH, container, options);
-      if (result) return result;
-    }
-
-    return this.#lastResort(container, options);
-  }
-
-  #tryQuality(targetH, container, options) {
-    const preferMp4 = options.preferMp4 !== false;
-
-    let candidates = this.#combined
-      .filter((f) => f.hasUrl && matchQualityRank(f, targetH))
-      .sort(this.#sortFn(preferMp4));
-
-    if (candidates.length) {
-      const picked = candidates[0];
-      const cc = container ? checkContainer(picked, container) : null;
-
-      if (container && cc && cc.needsConversion && !options.merge) {
-        throw new FormatError(
-          `Format "${container}" requires a merge/convert tool for itag ${picked.itag} (${picked.qualityLabel}, ${picked.container}). ` +
-          `Available source: ${picked.container}. Use { merge: { tool: 'ffmpeg', output: 'file.${container}' } } to convert.`,
-          {
-            itag: picked.itag,
-            sourceContainer: picked.container,
-            targetContainer: container,
-            requiresConversion: true,
-            suggestedTool: 'ffmpeg',
-          }
-        );
-      }
-
-      return { format: picked, type: 'combined' };
-    }
-
-    const videos = this.#adaptive
-      .filter((f) => f.isVideo && f.hasUrl && matchQualityRank(f, targetH))
-      .sort(this.#sortFn(preferMp4));
-
-    if (videos.length) {
-      const video = videos[0];
-      const audios = this.#adaptive
-        .filter((f) => f.isAudio && f.hasUrl)
-        .sort((a, b) => b.bitrate - a.bitrate);
-
-      const cc = container ? checkContainer(video, container) : null;
-
-      if (container && cc && cc.needsConversion && !options.merge) {
-        throw new FormatError(
-          `Format "${container}" requires a merge/convert tool. ` +
-          `Source: ${video.container}. Use { merge: { tool: 'ffmpeg', output: 'file.${container}' } }.`,
-          {
-            itag: video.itag,
-            sourceContainer: video.container,
-            targetContainer: container,
-            requiresConversion: true,
-            suggestedTool: 'ffmpeg',
-          }
-        );
-      }
-
-      const result = { format: video, type: 'video-only' };
-
-      if (audios.length) {
-        result.audio = audios[0];
-        result.type = 'separate';
-      }
-
-      return result;
-    }
-
-    return null;
-  }
-
-  #selectAudio(options) {
-    const container = options.format || options.container || null;
-    const audios = this.#all
-      .filter((f) => f.isAudio && f.hasUrl)
-      .sort((a, b) => b.bitrate - a.bitrate);
-
-    if (!audios.length) throw new FormatError('No audio formats available');
-
-    if (container) {
-      const match = audios.find((f) => f.container === container);
-      if (match) return { format: match, type: 'audio', audio: null };
-
-      const best = audios[0];
-      throw new FormatError(
-        `No audio format in "${container}" available. Best available: ${best.container} (${best.qualityLabel}). ` +
-        `Use { merge: { tool: 'ffmpeg', output: 'file.${container}' } } to convert.`,
-        {
-          sourceContainer: best.container,
-          targetContainer: container,
-          requiresConversion: true,
-          suggestedTool: 'ffmpeg',
-        }
-      );
-    }
-
-    return { format: audios[0], type: 'audio', audio: null };
-  }
-
-  #lastResort(container, options) {
-    if (this.#combined.length) {
-      return { format: this.#combined[0], type: 'combined' };
-    }
-    const video = this.#adaptive.find((f) => f.isVideo && f.hasUrl);
-    if (video) {
-      const audio = this.#adaptive.find((f) => f.isAudio && f.hasUrl);
-      return { format: video, type: audio ? 'separate' : 'video-only', audio };
-    }
-    throw new FormatError('No compatible formats found for this video');
-  }
-
-  #sortFn(preferMp4) {
-    return (a, b) => {
-      if (preferMp4) {
-        const aMp4 = a.container === 'mp4' ? 1 : 0;
-        const bMp4 = b.container === 'mp4' ? 1 : 0;
-        if (aMp4 !== bMp4) return bMp4 - aMp4;
-      }
-      return b.qualityRank - a.qualityRank;
-    };
-  }
-}
-
-module.exports = { FormatSelector };
-
-// utils/validators.js
-const { ValidationError } = require('../core/Errors');
-
-const VALID_QUALITIES = ['4320p', '2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p', 'auto', 'best', 'audio'];
-const VALID_CONTAINERS = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'm4a', 'aac', 'flac', 'ogg', 'mp3', 'wav'];
+const VALID_QUALITIES = [...QUALITY_TIERS, 'auto', 'best', 'audio'];
+const VALID_CONTAINERS = Object.keys(CONTAINER_MAP);
 
 function validateOptions(options = {}) {
   const errors = [];
@@ -768,7 +628,8 @@ function validateOptions(options = {}) {
 
 module.exports = { validateOptions, VALID_QUALITIES, VALID_CONTAINERS };
 
-// utils/url.js
+},["core/Errors","formats/Qualities","formats/Registry"]],
+"utils/url":[function(module,exports,__r__){
 const { URL } = require('node:url');
 
 function extractVideoId(input) {
@@ -805,10 +666,11 @@ function isValidVideoId(id) {
 
 module.exports = { extractVideoId, isValidVideoId };
 
-// download/Merge.js
+},[]],
+"download/Merge":[function(module,exports,__r__){
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
-const { MergeError } = require('../core/Errors');
+const { MergeError } = __r__('core/Errors');
 
 const TOOLS = {
   ffmpeg: {
@@ -912,17 +774,18 @@ module.exports = {
   TOOLS,
 };
 
-// download/Downloader.js
+},["core/Errors"]],
+"download/Downloader":[function(module,exports,__r__){
 const fs = require('node:fs');
 const https = require('node:https');
 const { URL } = require('node:url');
-const { head, stream } = require('../core/Client');
-const { NetworkError } = require('../core/Errors');
+const { head } = __r__('core/Client');
+const { NetworkError } = __r__('core/Errors');
 
 const CHUNK_SIZE = 10 * 1024 * 1024;
 const MAX_CONCURRENCY = 6;
 
-async function verify(url) {
+function verify(url) {
   return head(url);
 }
 
@@ -933,24 +796,23 @@ function createReadStream(url) {
 async function downloadToFile(url, filePath, options = {}) {
   const concurrency = options.concurrency || MAX_CONCURRENCY;
   const onProgress = options.onProgress || null;
-  const chunkSize = options.chunkSize || CHUNK_SIZE;
 
   const size = await getContentLength(url);
 
-  if (!size || size < chunkSize) {
+  if (!size || size < CHUNK_SIZE) {
     return simpleDownload(url, filePath, onProgress);
   }
 
-  return parallelDownload(url, filePath, size, concurrency, chunkSize, onProgress);
+  return parallelDownload(url, filePath, size, concurrency, onProgress);
 }
 
 function getContentLength(url) {
   return new Promise((resolve) => {
-    const u = new URL(url);
+    let u;
+    try { u = new URL(url); } catch { resolve(0); return; }
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
-      method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://www.youtube.com/',
@@ -959,8 +821,8 @@ function getContentLength(url) {
     }, (res) => {
       const cr = res.headers['content-range'];
       if (cr) {
-        const match = cr.match(/\/(\d+)/);
-        if (match) resolve(parseInt(match[1], 10));
+        const m = cr.match(/\/(\d+)/);
+        if (m) { resolve(parseInt(m[1], 10)); res.resume(); return; }
       }
       resolve(parseInt(res.headers['content-length'] || '0', 10));
       res.resume();
@@ -973,7 +835,8 @@ function getContentLength(url) {
 function simpleDownload(url, filePath, onProgress, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new NetworkError('Too many redirects'));
-    const u = new URL(url);
+    let u;
+    try { u = new URL(url); } catch { return reject(new NetworkError('Invalid URL')); }
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
@@ -996,9 +859,9 @@ function simpleDownload(url, filePath, onProgress, redirects = 0) {
       res.on('data', (chunk) => {
         downloaded += chunk.length;
         if (onProgress && total) onProgress(downloaded, total);
+        out.write(chunk);
       });
-
-      res.pipe(out);
+      res.on('end', () => { out.end(); });
       out.on('finish', () => resolve(filePath));
       out.on('error', reject);
     });
@@ -1007,37 +870,33 @@ function simpleDownload(url, filePath, onProgress, redirects = 0) {
   });
 }
 
-function parallelDownload(url, filePath, totalSize, concurrency, chunkSize, onProgress) {
-  const actualConcurrency = Math.min(concurrency, MAX_CONCURRENCY);
-  const count = Math.min(actualConcurrency, Math.ceil(totalSize / chunkSize));
-  const actualChunkSize = Math.ceil(totalSize / count);
-
-  const ranges = Array.from({ length: count }, (_, i) => ({
-    start: i * actualChunkSize,
-    end: i === count - 1 ? totalSize - 1 : (i + 1) * actualChunkSize - 1,
+async function parallelDownload(url, filePath, totalSize, concurrency, onProgress) {
+  const count = Math.min(Math.min(concurrency, MAX_CONCURRENCY), Math.ceil(totalSize / (1024 * 1024)));
+  const actualCount = Math.max(1, count);
+  const chunkSize = Math.ceil(totalSize / actualCount);
+  const ranges = Array.from({ length: actualCount }, (_, i) => ({
+    start: i * chunkSize,
+    end: i === actualCount - 1 ? totalSize - 1 : (i + 1) * chunkSize - 1,
   }));
 
-  return new Promise(async (resolve, reject) => {
-    try {
-      const buffers = await Promise.all(
-        ranges.map((r, i) => downloadChunk(url, r.start, r.end, i + 1, count))
-      );
-
-      if (onProgress) onProgress(totalSize, totalSize);
-
-      const full = Buffer.concat(buffers);
-      fs.writeFileSync(filePath, full);
-      resolve(filePath);
-    } catch (err) {
-      reject(err);
-    }
-  });
+  try {
+    const buffers = await Promise.all(
+      ranges.map((r) => downloadChunk(url, r.start, r.end))
+    );
+    if (onProgress) onProgress(totalSize, totalSize);
+    const full = Buffer.concat(buffers);
+    fs.writeFileSync(filePath, full);
+    return filePath;
+  } catch (err) {
+    throw new NetworkError('Parallel download failed: ' + err.message);
+  }
 }
 
-function downloadChunk(url, start, end, index, total, redirects = 0) {
+function downloadChunk(url, start, end, redirects = 0) {
   return new Promise((resolve, reject) => {
-    if (redirects > 5) return reject(new NetworkError('Too many redirects'));
-    const u = new URL(url);
+    if (redirects > 5) return reject(new Error('Too many redirects'));
+    let u;
+    try { u = new URL(url); } catch { return reject(new Error('Invalid URL')); }
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
@@ -1049,17 +908,17 @@ function downloadChunk(url, start, end, index, total, redirects = 0) {
     }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
         res.resume();
-        return resolve(downloadChunk(res.headers.location, start, end, index, total, redirects + 1));
+        return resolve(downloadChunk(res.headers.location, start, end, redirects + 1));
       }
       if (res.statusCode !== 200 && res.statusCode !== 206) {
-        return reject(new NetworkError(`Chunk HTTP ${res.statusCode}`));
+        return reject(new Error(`Chunk HTTP ${res.statusCode}`));
       }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => resolve(Buffer.concat(chunks)));
     });
     req.on('error', reject);
-    req.setTimeout(120000, () => { req.destroy(new Error(`Chunk ${index} timed out`)); });
+    req.setTimeout(120000, () => { req.destroy(new Error('Chunk timed out')); });
   });
 }
 
@@ -1070,9 +929,10 @@ module.exports = {
   getContentLength,
 };
 
-// download/Stream.js
+},["core/Client","core/Errors"]],
+"download/Stream":[function(module,exports,__r__){
 const { Transform } = require('node:stream');
-const { createReadStream } = require('./Downloader');
+const { createReadStream } = __r__('download/Downloader');
 
 class DownloadStream extends Transform {
   #url;
@@ -1118,7 +978,6 @@ function createStream(url, options = {}) {
   const source = createReadStream(url);
 
   source.on('error', (err) => transform.destroy(err));
-  source.on('response', () => {});
   source.pipe(transform);
 
   return transform;
@@ -1126,49 +985,9 @@ function createStream(url, options = {}) {
 
 module.exports = { DownloadStream, createStream };
 
-// utils/constants.js
-// ../package.json
-{
-  "name": "yt-direct",
-  "version": "1.0.0",
-  "description": "Hello, I present to you a module to download YouTube videos directly",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE"],
-  "scripts": {
-    "build": "node build/build.js",
-    "prepublishOnly": "npm run build",
-    "test": "node test/basic.js",
-    "example": "node examples/basic.js"
-  },
-  "keywords": [
-    "youtube",
-    "download",
-    "video",
-    "yt-dlp",
-    "innertube",
-    "downloader",
-    "ytdl",
-    "mp4",
-    "stream",
-    "no-dependencies"
-  ],
-  "license": "MIT",
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/SoyMaycol/yt-direct.git"
-  },
-  "bugs": {
-    "url": "https://github.com/SoyMaycol/yt-direct/issues"
-  },
-  "homepage": "https://github.com/SoyMaycol/yt-direct#readme",
-  "author": "SoyMaycol"
-}
-
-const pkg = require('../../package.json');
+},["download/Downloader"]],
+"utils/constants":[function(module,exports,__r__){
+const pkg = {"name":"yt-direct","version":"1.0.0","description":"Hello, I present to you a module to download YouTube videos directly","main":"dist/index.js","types":"dist/index.d.ts","files":["dist","README.md","LICENSE"],"scripts":{"build":"node build/build.js","prepublishOnly":"npm run build","test":"node test/basic.js","example":"node examples/basic.js"},"keywords":["youtube","download","video","yt-dlp","innertube","downloader","ytdl","mp4","stream","no-dependencies"],"license":"MIT","engines":{"node":">=18.0.0"},"repository":{"type":"git","url":"https://github.com/SoyMaycol/yt-direct.git"},"bugs":{"url":"https://github.com/SoyMaycol/yt-direct/issues"},"homepage":"https://github.com/SoyMaycol/yt-direct#readme","author":"SoyMaycol"};
 
 module.exports = {
   VERSION: pkg.version,
@@ -1184,121 +1003,277 @@ module.exports = {
   INTEGRITY_SEED: 'yt-direct-v1',
 };
 
-const { fetch } = require('./core/InnerTube');
-const { head } = require('./core/Client');
-const { YouTubeError, FormatError, ValidationError } = require('./core/Errors');
-const { FormatSelector } = require('./formats/Selector');
-const { Format } = require('./formats/Format');
-const { resolveContainer, requiresConversion, QUALITY_TIERS, CONTAINER_MAP } = require('./formats/Registry');
-const { validateOptions } = require('./utils/validators');
-const { extractVideoId } = require('./utils/url');
-const { merge } = require('./download/Merge');
-const { downloadToFile, createReadStream, verify } = require('./download/Downloader');
-const { createStream } = require('./download/Stream');
-const { VERSION } = require('./utils/constants');
+},[]],
+"core/Client":[function(module,exports,__r__){
+const https = require('node:https');
+const zlib = require('node:zlib');
+const { URL } = require('node:url');
 
-function ytdl(input, options = {}) {
-  const videoId = extractVideoId(input);
-  if (!videoId) {
-    return Promise.reject(new ValidationError(`Invalid YouTube URL or video ID: "${input}"`));
-  }
+const UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip';
+const API_KEY = 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
+const HOST = 'www.youtube.com';
+const PATH = '/youtubei/v1/player';
+const TIMEOUT = 20000;
 
-  const normalized = validateOptions(options);
-
-  return (async () => {
-    const info = await getInfo(videoId);
-    const selector = new FormatSelector(info.streamingData);
-    const selected = selector.select(normalized);
-
-    const format = selected.format;
-    const audio = selected.audio || null;
-
-    const response = {
-      videoId,
-      title: info.title || 'video',
-      url: format.url,
-      format,
-      audio,
-      type: selected.type,
-      stream: () => createStream(format.url),
-      pipe: (writable) => createStream(format.url).pipe(writable),
-      download: async (filePath) => {
-        if (!filePath) {
-          const ext = normalized.format || format.container || 'mp4';
-          filePath = `${sanitize(info.title || 'video')}.${ext}`;
-        }
-        return downloadToFile(format.url, filePath, {
-          concurrency: normalized.concurrency,
-          onProgress: normalized.onProgress,
-        });
+function request(body) {
+  return new Promise((resolve, reject) => {
+    const opts = {
+      hostname: HOST,
+      path: `${PATH}?key=${API_KEY}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': UA,
+        'Content-Length': Buffer.byteLength(body),
+        'Accept-Encoding': 'gzip',
+        'Origin': `https://${HOST}`,
       },
     };
-
-    if (normalized.merge && audio) {
-      response.merge = async (outputPath) => {
-        if (!outputPath) {
-          const ext = normalized.format || 'mkv';
-          outputPath = `${sanitize(info.title || 'video')}.${ext}`;
+    const req = https.request(opts, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        let buf = Buffer.concat(chunks);
+        if (res.headers['content-encoding'] === 'gzip') {
+          try { buf = zlib.gunzipSync(buf); } catch {}
         }
-        const tmpVideo = `/tmp/yt-direct-${format.itag}-video`;
-        const tmpAudio = `/tmp/yt-direct-${audio.itag}-audio`;
+        if (res.statusCode !== 200) {
+          return reject(new Error(`YouTube API returned HTTP ${res.statusCode}`));
+        }
         try {
-          await Promise.all([
-            downloadToFile(format.url, tmpVideo),
-            downloadToFile(audio.url, tmpAudio),
-          ]);
-          await merge(tmpVideo, tmpAudio, outputPath, normalized.merge);
-          return outputPath;
-        } finally {
-          try { require('node:fs').unlinkSync(tmpVideo); } catch {}
-          try { require('node:fs').unlinkSync(tmpAudio); } catch {}
+          resolve(JSON.parse(buf.toString('utf8')));
+        } catch (e) {
+          reject(new Error('Invalid JSON from YouTube API: ' + e.message));
         }
-      };
-    }
-
-    return response;
-  })();
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(TIMEOUT, () => { req.destroy(new Error('YouTube API request timed out')); });
+    req.write(body);
+    req.end();
+  });
 }
 
-async function getInfo(input) {
-  const videoId = extractVideoId(input);
-  if (!videoId) throw new ValidationError(`Invalid YouTube URL or video ID: "${input}"`);
+function head(url) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(url); } catch { resolve(false); return; }
+    const req = https.get({
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.youtube.com/',
+        'Range': 'bytes=0-0',
+      },
+    }, (res) => {
+      resolve(res.statusCode === 206 || res.statusCode === 200);
+      res.resume();
+    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(8000, () => { req.destroy(); resolve(false); });
+  });
+}
 
-  const result = await fetch(videoId);
-  const selector = new FormatSelector(result.streamingData);
+function stream(url) {
+  const u = new URL(url);
+  const req = https.get({
+    hostname: u.hostname,
+    path: u.pathname + u.search,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': 'https://www.youtube.com/',
+    },
+  });
+  req.setTimeout(30000);
+  return req;
+}
 
+module.exports = { request, head, stream };
+
+},[]],
+"formats/Format":[function(module,exports,__r__){
+const { getItagMeta } = __r__('formats/Registry');
+
+class Format {
+  #raw;
+  #meta;
+
+  constructor(rawFormat) {
+    this.#raw = rawFormat;
+    this.#meta = getItagMeta(rawFormat.itag) || {};
+
+    this.itag = rawFormat.itag;
+    this.url = rawFormat.url || null;
+    this.mimeType = rawFormat.mimeType || '';
+    this.contentLength = rawFormat.contentLength ? Number(rawFormat.contentLength) : 0;
+    this.bitrate = rawFormat.bitrate || 0;
+    this.width = rawFormat.width || 0;
+    this.height = rawFormat.height || 0;
+    this.fps = rawFormat.fps || 0;
+    this.qualityLabel = rawFormat.qualityLabel || this.#meta.quality || null;
+    this.container = rawFormat.container || this.#meta.container || 'mp4';
+    this.codec = rawFormat.codecs || this.#meta.codec || 'unknown';
+    this.isAudio = this.mimeType.includes('audio');
+    this.isVideo = this.mimeType.includes('video');
+    this.isCombined = this.#meta.type === 'combined' || (this.isVideo && this.mimeType.includes('mp4a'));
+    this.source = rawFormat._source || 'adaptive';
+  }
+
+  get hasUrl() {
+    return !!this.url;
+  }
+
+  get sizeMB() {
+    return this.contentLength > 0 ? (this.contentLength / 1024 / 1024).toFixed(1) : '?';
+  }
+
+  get qualityRank() {
+    if (this.isAudio) return this.bitrate;
+    return (this.height || 0) * (this.width || 0);
+  }
+
+  toJSON() {
+    return {
+      itag: this.itag,
+      quality: this.qualityLabel,
+      container: this.container,
+      codec: this.codec,
+      size: this.sizeMB,
+      width: this.width,
+      height: this.height,
+      fps: this.fps,
+      bitrate: this.bitrate,
+      type: this.isCombined ? 'combined' : this.isAudio ? 'audio' : 'video',
+      hasUrl: this.hasUrl,
+    };
+  }
+
+  inspect() {
+    return `Format(${this.itag} | ${this.qualityLabel} | ${this.container} | ${this.codec})`;
+  }
+
+  [Symbol.for('nodejs.util.inspect.custom')]() {
+    return this.inspect();
+  }
+}
+
+module.exports = { Format };
+
+},["formats/Registry"]],
+"formats/Qualities":[function(module,exports,__r__){
+const { QualityError } = __r__('core/Errors');
+
+const QUALITY_MAP = {
+  '4320p': 4320,
+  '2160p': 2160,
+  '1440p': 1440,
+  '1080p': 1080,
+  '720p': 720,
+  '480p': 480,
+  '360p': 360,
+  '240p': 240,
+  '144p': 144,
+};
+
+const QUALITY_TIERS = Object.keys(QUALITY_MAP);
+
+function toHeight(label) {
+  if (!label) return 0;
+  const cleaned = String(label).toLowerCase().replace(/[^0-9]/g, '');
+  const num = parseInt(cleaned, 10);
+  return isNaN(num) ? 0 : num;
+}
+
+function matchQualityRank(format, targetHeight, tolerance = 72) {
+  if (!targetHeight) return true;
+  const h = format.height || toHeight(format.qualityLabel);
+  if (!h) return false;
+  return Math.abs(h - targetHeight) <= tolerance;
+}
+
+function getFallbackChain(requested) {
+  const t = String(requested || '').toLowerCase();
+  if (t === 'auto' || t === 'best') return [...QUALITY_TIERS];
+  if (t === 'audio') return ['audio'];
+  const idx = QUALITY_TIERS.indexOf(t);
+  if (idx !== -1) return QUALITY_TIERS.slice(idx);
+  return [...QUALITY_TIERS];
+}
+
+function validateQuality(requested) {
+  if (!requested) return 'auto';
+  const t = String(requested).toLowerCase();
+  if (t === 'auto' || t === 'best' || t === 'audio') return t;
+  if (QUALITY_TIERS.includes(t)) return t;
+  throw new QualityError(
+    `Unsupported quality "${requested}". Available: ${QUALITY_TIERS.join(', ')}, auto, best, audio`,
+    { requested, supported: [...QUALITY_TIERS, 'auto', 'best', 'audio'] }
+  );
+}
+
+module.exports = {
+  QUALITY_MAP,
+  QUALITY_TIERS,
+  toHeight,
+  matchQualityRank,
+  getFallbackChain,
+  validateQuality,
+};
+
+},["core/Errors"]],
+"formats/mime":[function(module,exports,__r__){
+const { resolveContainer, requiresConversion } = __r__('formats/Registry');
+
+function mimeTypeToContainer(mimeType) {
+  if (!mimeType) return 'mp4';
+  const parts = mimeType.split('/');
+  if (parts.length < 2) return 'mp4';
+  const sub = parts[1].split(';')[0].trim().toLowerCase();
+  const map = {
+    mp4: 'mp4',
+    webm: 'webm',
+    'x-matroska': 'mkv',
+    'x-msvideo': 'avi',
+    quicktime: 'mov',
+    aac: 'aac',
+    mpeg: 'mp3',
+    wav: 'wav',
+    ogg: 'ogg',
+    flac: 'flac',
+    '3gpp': '3gp',
+  };
+  return map[sub] || sub;
+}
+
+function checkContainer(format, targetContainer) {
+  const current = format.container || mimeTypeToContainer(format.mimeType);
+  if (!targetContainer) return { compatible: true, current, needsConversion: false };
+  const tc = resolveContainer(targetContainer);
+  if (!tc) return { compatible: false, current, target: targetContainer, needsConversion: false };
+  if (current === targetContainer) return { compatible: true, current, target: targetContainer, needsConversion: false };
   return {
-    id: videoId,
-    title: result.videoDetails.title || 'Unknown',
-    author: result.videoDetails.author || result.videoDetails?.channelId || null,
-    duration: parseInt(result.videoDetails.lengthSeconds || '0', 10),
-    thumbnails: result.videoDetails.thumbnail?.thumbnails || [],
-    description: result.videoDetails.shortDescription || '',
-    viewCount: parseInt(result.videoDetails.viewCount || '0', 10),
-    isLive: result.videoDetails.isLive === true,
-    streamingData: result.streamingData,
-    formats: selector.list(),
-    combined: selector.combined.map((f) => f.toJSON()),
-    adaptive: selector.adaptive.map((f) => f.toJSON()),
-    clientUsed: result.clientUsed,
+    compatible: false,
+    current,
+    target: targetContainer,
+    needsConversion: true,
+    requiresTool: requiresConversion(format, targetContainer),
   };
 }
 
-function sanitize(name) {
-  return String(name || 'video').replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim() || 'video';
+module.exports = { mimeTypeToContainer, checkContainer };
+
+},["formats/Registry"]],
+};
+
+var __c={};
+function __r(id){
+  if(__c[id])return __c[id].exports;
+  var f=__m[id][0],d=__m[id][1],m={exports:{}};
+  __c[id]=m;
+  f(m,m.exports,function(q){for(var i=0;i<d.length;i++)if(d[i]===q)return __r(d[i]);throw new Error('Mod not found: '+q+' from '+id)});
+  return m.exports;
 }
 
-ytdl.getInfo = getInfo;
-ytdl.getFormats = (input) => getInfo(input).then((i) => i.formats);
-ytdl.verifyURL = verify;
-ytdl.createStream = createStream;
-ytdl.version = VERSION;
-
-ytdl.FORMATS = Object.keys(CONTAINER_MAP);
-ytdl.QUALITIES = [...QUALITY_TIERS, 'auto', 'best', 'audio'];
-ytdl.FormatError = FormatError;
-ytdl.YouTubeError = YouTubeError;
-ytdl.ValidationError = ValidationError;
-
-module.exports = ytdl;
-module.exports.default = ytdl;
+module.exports=__r("index");
+})();
