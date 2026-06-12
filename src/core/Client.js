@@ -2,7 +2,8 @@ const https = require('node:https');
 const zlib = require('node:zlib');
 const { URL } = require('node:url');
 
-const UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip';
+const ANDROID_UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip';
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const API_KEY = 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
 const HOST = 'www.youtube.com';
 const PATH = '/youtubei/v1/player';
@@ -16,7 +17,7 @@ function request(body) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': UA,
+        'User-Agent': ANDROID_UA,
         'Content-Length': Buffer.byteLength(body),
         'Accept-Encoding': 'gzip',
         'Origin': `https://${HOST}`,
@@ -47,6 +48,18 @@ function request(body) {
   });
 }
 
+function videoHeaders() {
+  return {
+    'User-Agent': BROWSER_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-us,en;q=0.5',
+    'Accept-Encoding': 'identity',
+    'Referer': 'https://www.youtube.com/',
+    'Origin': 'https://www.youtube.com',
+    'Connection': 'keep-alive',
+  };
+}
+
 function head(url) {
   return new Promise((resolve) => {
     let u;
@@ -54,11 +67,7 @@ function head(url) {
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Range': 'bytes=0-0',
-      },
+      headers: { ...videoHeaders(), 'Range': 'bytes=0-0' },
     }, (res) => {
       resolve(res.statusCode === 206 || res.statusCode === 200);
       res.resume();
@@ -73,13 +82,10 @@ function stream(url) {
   const req = https.get({
     hostname: u.hostname,
     path: u.pathname + u.search,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Referer': 'https://www.youtube.com/',
-    },
+    headers: videoHeaders(),
   });
   req.setTimeout(30000);
   return req;
 }
 
-module.exports = { request, head, stream };
+module.exports = { request, head, stream, videoHeaders, ANDROID_UA, BROWSER_UA };

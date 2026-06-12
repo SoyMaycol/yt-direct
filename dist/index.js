@@ -1,4 +1,4 @@
-/*! yt-direct v1.0.0 | MIT */
+/*! yt-direct v1.1.0 | MIT */
 
 (function(){
 'use strict';
@@ -8,11 +8,11 @@ const __m = {
 const { fetch } = __r__('core/InnerTube');
 const { YouTubeError, FormatError, ValidationError, QualityError, MergeError, NetworkError } = __r__('core/Errors');
 const { FormatSelector } = __r__('formats/Selector');
-const { resolveContainer, requiresConversion, QUALITY_TIERS, CONTAINER_MAP } = __r__('formats/Registry');
+const { QUALITY_TIERS, CONTAINER_MAP } = __r__('formats/Registry');
 const { validateOptions } = __r__('utils/validators');
 const { extractVideoId } = __r__('utils/url');
 const { merge } = __r__('download/Merge');
-const { downloadToFile, createReadStream, verify } = __r__('download/Downloader');
+const { downloadToFile, verify } = __r__('download/Downloader');
 const { createStream } = __r__('download/Stream');
 const { VERSION } = __r__('utils/constants');
 
@@ -22,61 +22,75 @@ function ytdl(input, options = {}) {
     return Promise.reject(new ValidationError(`Invalid YouTube URL or video ID: "${input}"`));
   }
 
-  const normalized = validateOptions(options);
+  const o = validateOptions(options);
 
   return (async () => {
+    const t0 = Date.now();
     const info = await getInfo(videoId);
     const selector = new FormatSelector(info.streamingData);
-    const selected = selector.select(normalized);
+    const selected = selector.select(o);
 
     const format = selected.format;
     const audio = selected.audio || null;
 
-    const response = {
+    const dopts = {
+      concurrency: o.concurrency,
+      timeout: o.timeout,
+      headers: o.headers,
+      cookies: o.cookies,
+      onProgress: o.onProgress,
+    };
+
+    const res = {
       videoId,
       title: info.title || 'video',
       url: format.url,
       format,
       audio,
       type: selected.type,
-      stream: () => createStream(format.url),
-      pipe: (writable) => createStream(format.url).pipe(writable),
-      download: async (filePath) => {
-        if (!filePath) {
-          const ext = normalized.format || format.container || 'mp4';
-          filePath = `${sanitize(info.title || 'video')}.${ext}`;
-        }
-        return downloadToFile(format.url, filePath, {
-          concurrency: normalized.concurrency,
-          onProgress: normalized.onProgress,
-        });
+      _infoTime: Date.now() - t0,
+
+      stream: () => createStream(format.url, dopts),
+      pipe: (w) => createStream(format.url, dopts).pipe(w),
+
+      download: async (fp) => {
+        if (!fp) fp = `${sanitize(info.title || 'video')}.${o.format || format.container || 'mp4'}`;
+        const result = await downloadToFile(format.url, fp, dopts);
+        return {
+          path: result.path,
+          size: result.size,
+          statusCode: result.code,
+          time: result.time,
+          speed: result.size > 0 && result.time > 0 ? Math.round((result.size / 1024 / 1024) / (result.time / 1000) * 10) / 10 : 0,
+        };
       },
     };
 
-    if (normalized.merge && audio) {
-      response.merge = async (outputPath) => {
-        if (!outputPath) {
-          const ext = normalized.format || 'mp4';
-          outputPath = `${sanitize(info.title || 'video')}.${ext}`;
-        }
+    if (o.merge && audio) {
+      res.merge = async (fp) => {
+        if (!fp) fp = `${sanitize(info.title || 'video')}.${o.format || 'mp4'}`;
         const fs = require('node:fs');
-        const tmpVideo = `/tmp/yt-direct-${format.itag}-video`;
-        const tmpAudio = `/tmp/yt-direct-${audio.itag}-audio`;
+        const tv = `/tmp/y-${format.itag}-v`;
+        const ta = `/tmp/y-${audio.itag}-a`;
         try {
+          const t0 = Date.now();
           await Promise.all([
-            downloadToFile(format.url, tmpVideo),
-            downloadToFile(audio.url, tmpAudio),
+            downloadToFile(format.url, tv, dopts),
+            downloadToFile(audio.url, ta, dopts),
           ]);
-          await merge(tmpVideo, tmpAudio, outputPath, normalized.merge);
-          return outputPath;
+          await merge(tv, ta, fp, o.merge);
+          return {
+            path: fp,
+            time: Date.now() - t0,
+          };
         } finally {
-          try { fs.unlinkSync(tmpVideo); } catch {}
-          try { fs.unlinkSync(tmpAudio); } catch {}
+          try { fs.unlinkSync(tv); } catch {}
+          try { fs.unlinkSync(ta); } catch {}
         }
       };
     }
 
-    return response;
+    return res;
   })();
 }
 
@@ -85,7 +99,7 @@ async function getInfo(input) {
   if (!videoId) throw new ValidationError(`Invalid YouTube URL or video ID: "${input}"`);
 
   const result = await fetch(videoId);
-  const selector = new FormatSelector(result.streamingData);
+  const sel = new FormatSelector(result.streamingData);
 
   return {
     id: videoId,
@@ -97,9 +111,9 @@ async function getInfo(input) {
     viewCount: parseInt(result.videoDetails.viewCount || '0', 10),
     isLive: result.videoDetails.isLive === true,
     streamingData: result.streamingData,
-    formats: selector.list(),
-    combined: selector.combined.map((f) => f.toJSON()),
-    adaptive: selector.adaptive.map((f) => f.toJSON()),
+    formats: sel.list(),
+    combined: sel.combined.map((f) => f.toJSON()),
+    adaptive: sel.adaptive.map((f) => f.toJSON()),
     clientUsed: result.clientUsed,
   };
 }
@@ -109,7 +123,7 @@ function sanitize(name) {
 }
 
 ytdl.getInfo = getInfo;
-ytdl.getFormats = (input) => getInfo(input).then((i) => i.formats);
+ytdl.getFormats = (i) => getInfo(i).then((r) => r.formats);
 ytdl.verifyURL = verify;
 ytdl.createStream = createStream;
 ytdl.version = VERSION;
@@ -589,6 +603,12 @@ const { CONTAINER_MAP } = __r__('formats/Registry');
 
 const VALID_QUALITIES = [...QUALITY_TIERS, 'auto', 'best', 'audio'];
 const VALID_CONTAINERS = Object.keys(CONTAINER_MAP);
+const VALID_FILTERS = ['audioandvideo', 'videoonly', 'audioonly'];
+const VALID_LANGUAGES = ['en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh', 'ru', 'ar', 'hi'];
+const MAX_CONCURRENCY = 12;
+const MIN_CONCURRENCY = 1;
+const MAX_RETRIES = 10;
+const MAX_TIMEOUT = 600000;
 
 function validateOptions(options = {}) {
   const errors = [];
@@ -601,13 +621,50 @@ function validateOptions(options = {}) {
     errors.push(`Invalid format "${options.format}". Valid: ${VALID_CONTAINERS.join(', ')}`);
   }
 
-  if (options.filter && !['audioandvideo', 'videoonly', 'audioonly'].includes(options.filter)) {
-    errors.push('filter must be "audioandvideo", "videoonly", or "audioonly"');
+  if (options.filter && !VALID_FILTERS.includes(options.filter)) {
+    errors.push(`filter must be one of: ${VALID_FILTERS.join(', ')}`);
+  }
+
+  if (options.language && !VALID_LANGUAGES.includes(options.language)) {
+    errors.push(`language must be a valid ISO code: ${VALID_LANGUAGES.join(', ')}`);
   }
 
   if (options.merge) {
     if (typeof options.merge !== 'object' || Array.isArray(options.merge)) {
       errors.push('merge must be an object with optional { tool, path, output }');
+    }
+  }
+
+  if (options.headers !== undefined) {
+    if (typeof options.headers !== 'object' || options.headers === null || Array.isArray(options.headers)) {
+      errors.push('headers must be a plain object like { "Referer": "..." }');
+    }
+  }
+
+  if (options.concurrency !== undefined) {
+    const n = parseInt(options.concurrency, 10);
+    if (isNaN(n) || n < MIN_CONCURRENCY || n > MAX_CONCURRENCY) {
+      errors.push(`concurrency must be a number between ${MIN_CONCURRENCY} and ${MAX_CONCURRENCY}`);
+    }
+  }
+
+  if (options.timeout !== undefined) {
+    const n = parseInt(options.timeout, 10);
+    if (isNaN(n) || n < 5000 || n > MAX_TIMEOUT) {
+      errors.push(`timeout must be between 5000 and ${MAX_TIMEOUT}ms`);
+    }
+  }
+
+  if (options.retries !== undefined) {
+    const n = parseInt(options.retries, 10);
+    if (isNaN(n) || n < 0 || n > MAX_RETRIES) {
+      errors.push(`retries must be between 0 and ${MAX_RETRIES}`);
+    }
+  }
+
+  if (options.cookies !== undefined) {
+    if (typeof options.cookies !== 'string' && typeof options.cookies !== 'object') {
+      errors.push('cookies must be a string (path to cookie jar) or an object { name: value }');
     }
   }
 
@@ -619,14 +676,21 @@ function validateOptions(options = {}) {
     quality: String(options.quality || 'auto').toLowerCase(),
     format: options.format ? String(options.format).toLowerCase() : null,
     filter: options.filter || 'audioandvideo',
+    language: options.language || 'en',
     preferMp4: options.preferMp4 !== false,
     merge: options.merge || null,
-    concurrency: Math.min(Math.max(parseInt(options.concurrency) || 6, 1), 12),
+    headers: (options.headers && typeof options.headers === 'object' && !Array.isArray(options.headers))
+      ? { ...options.headers }
+      : null,
+    cookies: options.cookies || null,
+    concurrency: Math.min(Math.max(parseInt(options.concurrency) || 6, MIN_CONCURRENCY), MAX_CONCURRENCY),
+    timeout: Math.min(Math.max(parseInt(options.timeout) || 30000, 5000), MAX_TIMEOUT),
+    retries: Math.min(Math.max(parseInt(options.retries) || 3, 0), MAX_RETRIES),
     onProgress: typeof options.onProgress === 'function' ? options.onProgress : null,
   };
 }
 
-module.exports = { validateOptions, VALID_QUALITIES, VALID_CONTAINERS };
+module.exports = { validateOptions, VALID_QUALITIES, VALID_CONTAINERS, VALID_FILTERS };
 
 },["core/Errors","formats/Qualities","formats/Registry"]],
 "utils/url":[function(module,exports,__r__){
@@ -676,26 +740,44 @@ const TOOLS = {
   ffmpeg: {
     cmd: 'ffmpeg',
     label: 'FFmpeg',
-    check: () => {
-      return new Promise((resolve) => {
-        const proc = spawn('ffmpeg', ['-version'], { stdio: 'ignore' });
-        proc.on('error', () => resolve(false));
-        proc.on('close', (code) => resolve(code === 0));
-      });
-    },
+    check: () => spawnCheck('ffmpeg', ['-version']),
   },
   avconv: {
     cmd: 'avconv',
     label: 'avconv (Libav)',
-    check: () => {
-      return new Promise((resolve) => {
-        const proc = spawn('avconv', ['-version'], { stdio: 'ignore' });
-        proc.on('error', () => resolve(false));
-        proc.on('close', (code) => resolve(code === 0));
-      });
-    },
+    check: () => spawnCheck('avconv', ['-version']),
+  },
+  mkvmerge: {
+    cmd: 'mkvmerge',
+    label: 'mkvmerge (MKVToolNix)',
+    check: () => spawnCheck('mkvmerge', ['--version']),
+    merge: (videoPath, audioPath, outputPath) => ({
+      cmd: 'mkvmerge',
+      args: ['-o', outputPath, videoPath, audioPath],
+    }),
+  },
+  gstreamer: {
+    cmd: 'gst-launch-1.0',
+    label: 'GStreamer',
+    check: () => spawnCheck('gst-launch-1.0', ['--version']),
+    merge: (videoPath, audioPath, outputPath) => ({
+      cmd: 'gst-launch-1.0',
+      args: [
+        'filesrc', `location=${videoPath}`, '!', 'qtdemux', '!', 'queue', '!',
+        'mux.', 'filesrc', `location=${audioPath}`, '!', 'qtdemux', '!', 'queue', '!',
+        'mux.', 'qtmux', 'name=mux', '!', 'filesink', `location=${outputPath}`,
+      ],
+    }),
   },
 };
+
+function spawnCheck(cmd, args) {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, args, { stdio: 'ignore' });
+    proc.on('error', () => resolve(false));
+    proc.on('close', (code) => resolve(code === 0));
+  });
+}
 
 async function detectTool(name) {
   if (name) {
@@ -706,7 +788,7 @@ async function detectTool(name) {
     return tool;
   }
 
-  for (const [key, tool] of Object.entries(TOOLS)) {
+  for (const tool of Object.values(TOOLS)) {
     if (await tool.check()) return tool;
   }
 
@@ -714,6 +796,7 @@ async function detectTool(name) {
 }
 
 function buildArgs(tool, videoPath, audioPath, outputPath) {
+  if (tool.merge) return tool.merge(videoPath, audioPath, outputPath);
   const cmd = tool.cmd || 'ffmpeg';
   return {
     cmd,
@@ -742,7 +825,7 @@ async function merge(videoPath, audioPath, outputPath, options = {}) {
 
   if (!tool) {
     throw new MergeError(
-      'No merge/conversion tool detected. Install FFmpeg (https://ffmpeg.org) or avconv. ' +
+      'No merge/conversion tool detected. Install FFmpeg (https://ffmpeg.org), avconv, mkvmerge, or gstreamer. ' +
       'Alternatively, use { merge: { path: "/path/to/ffmpeg" } } to specify a custom binary.'
     );
   }
@@ -779,11 +862,11 @@ module.exports = {
 const fs = require('node:fs');
 const https = require('node:https');
 const { URL } = require('node:url');
-const { head } = __r__('core/Client');
+const { head, stream, videoHeaders } = __r__('core/Client');
 const { NetworkError } = __r__('core/Errors');
 
-const CHUNK_SIZE = 10 * 1024 * 1024;
-const MAX_CONCURRENCY = 6;
+const MAX_CHUNKS = 4;
+const CHUNK_SIZE = 50 * 1024 * 1024;
 
 function verify(url) {
   return head(url);
@@ -794,105 +877,109 @@ function createReadStream(url) {
 }
 
 async function downloadToFile(url, filePath, options = {}) {
-  const concurrency = options.concurrency || MAX_CONCURRENCY;
   const onProgress = options.onProgress || null;
+  const timeout = options.timeout || 300000;
+  const concurrency = options.concurrency || 1;
+  const extra = buildExtraHeaders(options);
 
-  const size = await getContentLength(url);
-
-  if (!size || size < CHUNK_SIZE) {
-    return simpleDownload(url, filePath, onProgress);
+  if (concurrency > 1) {
+    const cl = await contentLength(url, extra, timeout);
+    const total = typeof cl === 'object' ? cl.size : cl;
+    if (!total) throw new NetworkError('Could not determine file size');
+    if (total < 50 * 1024 * 1024) {
+      return sequentialDownload(url, filePath, total, onProgress, timeout, extra);
+    }
+    return parallelDownload(url, filePath, total, onProgress, timeout, extra);
   }
 
-  return parallelDownload(url, filePath, size, concurrency, onProgress);
+  return sequentialDownload(url, filePath, 0, onProgress, timeout, extra);
 }
 
-function getContentLength(url) {
+function buildExtraHeaders(options) {
+  const h = {};
+  if (options.headers) Object.assign(h, options.headers);
+  if (options.cookies) {
+    if (typeof options.cookies === 'string') h['Cookie'] = options.cookies;
+    else h['Cookie'] = Object.entries(options.cookies).map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+  return Object.keys(h).length ? h : null;
+}
+
+function contentLength(url, extra, timeout) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch { resolve(0); return; }
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Range': 'bytes=0-0',
-      },
+      headers: { ...videoHeaders(), ...extra, 'Range': 'bytes=0-0' },
     }, (res) => {
       const cr = res.headers['content-range'];
       if (cr) {
         const m = cr.match(/\/(\d+)/);
-        if (m) { resolve(parseInt(m[1], 10)); res.resume(); return; }
+        if (m) { resolve({ size: parseInt(m[1], 10), code: res.statusCode }); res.resume(); return; }
       }
-      resolve(parseInt(res.headers['content-length'] || '0', 10));
+      resolve({ size: parseInt(res.headers['content-length'] || '0', 10), code: res.statusCode });
       res.resume();
     });
-    req.on('error', () => resolve(0));
-    req.setTimeout(10000, () => { req.destroy(); resolve(0); });
+    req.on('error', () => resolve({ size: 0, code: 0 }));
+    req.setTimeout(timeout || 10000, () => { req.destroy(); resolve({ size: 0, code: 0 }); });
   });
 }
 
-function simpleDownload(url, filePath, onProgress, redirects = 0) {
+function sequentialDownload(url, filePath, total, onProgress, timeout, extra, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new NetworkError('Too many redirects'));
     let u;
     try { u = new URL(url); } catch { return reject(new NetworkError('Invalid URL')); }
+    const t0 = Date.now();
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-      },
+      headers: { ...videoHeaders(), ...extra },
     }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
         res.resume();
-        return resolve(simpleDownload(res.headers.location, filePath, onProgress, redirects + 1));
+        return resolve(sequentialDownload(res.headers.location, filePath, onProgress, timeout, extra, redirects + 1));
       }
-      if (res.statusCode !== 200) {
-        return reject(new NetworkError(`Download failed with HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200 && res.statusCode !== 206) {
+        return reject(new NetworkError(`HTTP ${res.statusCode}`));
       }
       const total = parseInt(res.headers['content-length'] || '0', 10);
       let downloaded = 0;
-      const out = fs.createWriteStream(filePath);
+      const out = fs.createWriteStream(filePath, { highWaterMark: 1024 * 1024 });
 
       res.on('data', (chunk) => {
         downloaded += chunk.length;
-        if (onProgress && total) onProgress(downloaded, total);
+        if (onProgress) onProgress(downloaded, total);
         out.write(chunk);
       });
-      res.on('end', () => { out.end(); });
-      out.on('finish', () => resolve(filePath));
+      res.on('end', () => out.end());
+      out.on('finish', () => resolve({ path: filePath, size: total, time: Date.now() - t0, code: res.statusCode }));
       out.on('error', reject);
     });
     req.on('error', reject);
-    req.setTimeout(300000, () => { req.destroy(new Error('Download timed out')); });
+    req.setTimeout(timeout, () => { req.destroy(new NetworkError('Timed out')); });
   });
 }
 
-async function parallelDownload(url, filePath, totalSize, concurrency, onProgress) {
-  const count = Math.min(Math.min(concurrency, MAX_CONCURRENCY), Math.ceil(totalSize / (1024 * 1024)));
-  const actualCount = Math.max(1, count);
-  const chunkSize = Math.ceil(totalSize / actualCount);
-  const ranges = Array.from({ length: actualCount }, (_, i) => ({
-    start: i * chunkSize,
-    end: i === actualCount - 1 ? totalSize - 1 : (i + 1) * chunkSize - 1,
+async function parallelDownload(url, filePath, total, onProgress, timeout, extra) {
+  const count = Math.min(MAX_CHUNKS, Math.max(2, Math.ceil(total / CHUNK_SIZE)));
+  const size = Math.ceil(total / count);
+  const ranges = Array.from({ length: count }, (_, i) => ({
+    start: i * size,
+    end: i === count - 1 ? total - 1 : (i + 1) * size - 1,
   }));
 
-  try {
-    const buffers = await Promise.all(
-      ranges.map((r) => downloadChunk(url, r.start, r.end))
-    );
-    if (onProgress) onProgress(totalSize, totalSize);
-    const full = Buffer.concat(buffers);
-    fs.writeFileSync(filePath, full);
-    return filePath;
-  } catch (err) {
-    throw new NetworkError('Parallel download failed: ' + err.message);
-  }
+  const t0 = Date.now();
+  const buffers = await Promise.all(ranges.map((r) => chunkFetch(url, r.start, r.end, 0, timeout, extra)));
+
+  if (onProgress) onProgress(total, total);
+  fs.writeFileSync(filePath, Buffer.concat(buffers));
+  return { path: filePath, size: total, time: Date.now() - t0, code: 206 };
 }
 
-function downloadChunk(url, start, end, redirects = 0) {
+function chunkFetch(url, start, end, redirects = 0, timeout, extra) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error('Too many redirects'));
     let u;
@@ -900,15 +987,11 @@ function downloadChunk(url, start, end, redirects = 0) {
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Range': `bytes=${start}-${end}`,
-      },
+      headers: { ...videoHeaders(), ...extra, 'Range': `bytes=${start}-${end}` },
     }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location) {
         res.resume();
-        return resolve(downloadChunk(res.headers.location, start, end, redirects + 1));
+        return resolve(chunkFetch(res.headers.location, start, end, redirects + 1, timeout, extra));
       }
       if (res.statusCode !== 200 && res.statusCode !== 206) {
         return reject(new Error(`Chunk HTTP ${res.statusCode}`));
@@ -918,7 +1001,7 @@ function downloadChunk(url, start, end, redirects = 0) {
       res.on('end', () => resolve(Buffer.concat(chunks)));
     });
     req.on('error', reject);
-    req.setTimeout(120000, () => { req.destroy(new Error('Chunk timed out')); });
+    req.setTimeout(timeout, () => { req.destroy(new Error('Chunk timed out')); });
   });
 }
 
@@ -926,7 +1009,7 @@ module.exports = {
   verify,
   createReadStream,
   downloadToFile,
-  getContentLength,
+  contentLength,
 };
 
 },["core/Client","core/Errors"]],
@@ -987,7 +1070,7 @@ module.exports = { DownloadStream, createStream };
 
 },["download/Downloader"]],
 "utils/constants":[function(module,exports,__r__){
-const pkg = {"name":"yt-direct","version":"1.0.0","description":"Hello, I present to you a module to download YouTube videos directly","main":"dist/index.js","types":"dist/index.d.ts","files":["dist","README.md","LICENSE"],"scripts":{"build":"node build/build.js","prepublishOnly":"npm run build","test":"node test/basic.js","example":"node examples/basic.js"},"keywords":["youtube","download","video","yt-dlp","innertube","downloader","ytdl","mp4","stream","no-dependencies"],"license":"MIT","engines":{"node":">=18.0.0"},"repository":{"type":"git","url":"https://github.com/SoyMaycol/yt-direct.git"},"bugs":{"url":"https://github.com/SoyMaycol/yt-direct/issues"},"homepage":"https://github.com/SoyMaycol/yt-direct#readme","author":"SoyMaycol"};
+const pkg = {"name":"yt-direct","version":"1.1.0","description":"Hello, I present to you a module to download YouTube videos directly","main":"dist/index.js","types":"dist/index.d.ts","files":["dist","README.md","LICENSE"],"scripts":{"build":"node build/build.js","prepublishOnly":"npm run build","test":"node test/basic.js","example":"node examples/basic.js"},"keywords":["youtube","download","video","yt-dlp","innertube","downloader","ytdl","mp4","stream","no-dependencies"],"license":"MIT","engines":{"node":">=18.0.0"},"repository":{"type":"git","url":"https://github.com/SoyMaycol/yt-direct.git"},"bugs":{"url":"https://github.com/SoyMaycol/yt-direct/issues"},"homepage":"https://github.com/SoyMaycol/yt-direct#readme","author":"SoyMaycol"};
 
 module.exports = {
   VERSION: pkg.version,
@@ -1009,7 +1092,8 @@ const https = require('node:https');
 const zlib = require('node:zlib');
 const { URL } = require('node:url');
 
-const UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip';
+const ANDROID_UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip';
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const API_KEY = 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
 const HOST = 'www.youtube.com';
 const PATH = '/youtubei/v1/player';
@@ -1023,7 +1107,7 @@ function request(body) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': UA,
+        'User-Agent': ANDROID_UA,
         'Content-Length': Buffer.byteLength(body),
         'Accept-Encoding': 'gzip',
         'Origin': `https://${HOST}`,
@@ -1054,6 +1138,18 @@ function request(body) {
   });
 }
 
+function videoHeaders() {
+  return {
+    'User-Agent': BROWSER_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-us,en;q=0.5',
+    'Accept-Encoding': 'identity',
+    'Referer': 'https://www.youtube.com/',
+    'Origin': 'https://www.youtube.com',
+    'Connection': 'keep-alive',
+  };
+}
+
 function head(url) {
   return new Promise((resolve) => {
     let u;
@@ -1061,11 +1157,7 @@ function head(url) {
     const req = https.get({
       hostname: u.hostname,
       path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Range': 'bytes=0-0',
-      },
+      headers: { ...videoHeaders(), 'Range': 'bytes=0-0' },
     }, (res) => {
       resolve(res.statusCode === 206 || res.statusCode === 200);
       res.resume();
@@ -1080,16 +1172,13 @@ function stream(url) {
   const req = https.get({
     hostname: u.hostname,
     path: u.pathname + u.search,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Referer': 'https://www.youtube.com/',
-    },
+    headers: videoHeaders(),
   });
   req.setTimeout(30000);
   return req;
 }
 
-module.exports = { request, head, stream };
+module.exports = { request, head, stream, videoHeaders, ANDROID_UA, BROWSER_UA };
 
 },[]],
 "formats/Format":[function(module,exports,__r__){
@@ -1187,7 +1276,7 @@ function toHeight(label) {
 
 function matchQualityRank(format, targetHeight, tolerance = 72) {
   if (!targetHeight) return true;
-  const h = format.height || toHeight(format.qualityLabel);
+  const h = Math.min(format.height || 0, format.width || 0) || toHeight(format.qualityLabel);
   if (!h) return false;
   return Math.abs(h - targetHeight) <= tolerance;
 }

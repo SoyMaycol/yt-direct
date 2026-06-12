@@ -1,46 +1,43 @@
 # yt-direct
 
-**Zero-dependency YouTube video downloader**
-Uses the InnerTube API (same as yt-dlp). No external modules required.
+**Zero-dependency YouTube video downloader** — InnerTube API (same as yt-dlp). No external modules.
 
 ```bash
 npm install yt-direct
+```
+
+```js
+const ytdl = require('yt-direct');
+// or: import ytdl from 'yt-direct';
 ```
 
 ---
 
 ## Features
 
-- **No external dependencies** — only uses Node.js built-in modules
-- **InnerTube API** — same protocol as yt-dlp, no scraper needed
+- **No dependencies** — only Node.js built-ins
+- **InnerTube API** — no scraper, no API key
 - **Quality selection** — auto, 2160p, 1440p, 1080p, 720p, 480p, 360p, audio
 - **Format selection** — mp4, webm, mkv, avi, mov, m4a, aac, flac, ogg, mp3, wav
-- **FFmpeg merge** — combine separate video + audio streams
-- **Parallel downloads** — faster large file transfers
-- **Stream interface** — pipe directly to writable streams
-- **No API key required**
+- **Merge tools** — auto-detects ffmpeg, avconv, mkvmerge, gstreamer
+- **Streaming** — pipe directly to any writable stream
+- **Custom headers, cookies, timeout, retries**
+- **Download result includes statusCode + timing + speed**
 
 ---
 
 ## Quick Start
 
 ```javascript
-const ytdl = require('yt-direct');
+const video = await ytdl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
+  quality: '720p',
+  format: 'mp4',
+});
 
-(async () => {
-  const video = await ytdl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
-    quality: '720p',
-    format: 'mp4',
-  });
-
-  console.log('Title:', video.title);
-  await video.download('./video.mp4');
-})();
-```
-
-And don't worry, it is compatible with ESM:
-```javascript
-import ytdl from 'yt-direct';
+console.log('Title:', video.title);
+const result = await video.download('./video.mp4');
+console.log('Downloaded:', result.size, 'bytes in', result.time, 'ms');
+console.log('Status:', result.statusCode, '| Speed:', result.speed, 'MB/s');
 ```
 
 ---
@@ -49,17 +46,22 @@ import ytdl from 'yt-direct';
 
 ### `ytdl(url, options?)`
 
-Downloads a YouTube video. Returns a `VideoResult` object.
+Returns a `VideoResult` object.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `quality` | `string` | `'auto'` | `'auto'`, `'best'`, `'2160p'`, `'1440p'`, `'1080p'`, `'720p'`, `'480p'`, `'360p'`, `'audio'` |
+| `quality` | `string` | `'auto'` | `auto`, `best`, `2160p`, `1440p`, `1080p`, `720p`, `480p`, `360p`, `audio` |
 | `format` | `string` | `null` | Target container (see Format Support) |
-| `filter` | `string` | `'audioandvideo'` | `'audioandvideo'`, `'videoonly'`, `'audioonly'` |
+| `filter` | `string` | `'audioandvideo'` | `audioandvideo`, `videoonly`, `audioonly` |
+| `language` | `string` | `'en'` | ISO code: `en`, `es`, `pt`, `fr`, `de`, `ja`, etc |
 | `preferMp4` | `boolean` | `true` | Prefer mp4 over webm at same quality |
-| `concurrency` | `number` | `6` | Parallel download streams (1–12) |
-| `merge` | `object` | `null` | FFmpeg merge config (see Merging) |
-| `onProgress` | `function` | `null` | `(done, total) => {}` |
+| `concurrency` | `number` | `1` | Parallel chunks (1–12). `1` = sequential, starts instantly |
+| `timeout` | `number` | `30000` | Per-request timeout in ms (5000–600000) |
+| `retries` | `number` | `3` | Retry attempts on failure (0–10) |
+| `headers` | `object` | `null` | Extra HTTP headers `{ 'X-Custom': 'value' }` |
+| `cookies` | `string\|object` | `null` | Cookie string or `{ name: value }` object |
+| `merge` | `object` | `null` | Merge config (see Merging) |
+| `onProgress` | `function` | `null` | `(downloaded, total)` called during download |
 
 #### VideoResult
 
@@ -68,68 +70,65 @@ Downloads a YouTube video. Returns a `VideoResult` object.
 | `title` | `string` | Video title |
 | `url` | `string` | Direct stream URL |
 | `format` | `Format` | Selected video format |
-| `audio` | `Format?` | Selected audio format (if separate) |
-| `type` | `string` | `'combined'`, `'separate'`, `'video-only'`, `'audio'` |
+| `audio` | `Format?` | Audio format (if separate stream) |
+| `type` | `string` | `combined`, `separate`, `video-only`, `audio` |
 | `stream()` | `ReadableStream` | Get a readable stream |
-| `pipe(writable)` | `Writable` | Pipe to a writable stream |
-| `download(path?)` | `Promise<string>` | Download to file |
-| `merge(output?)` | `Promise<string>` | Download and merge via FFmpeg |
+| `pipe(w)` | `Writable` | Pipe to a writable stream |
+| `download(path?)` | `Promise<DownloadResult>` | Download to file |
 
----
-
-## Format Support
-
-### Native (direct from YouTube)
-
-| Container | Extension | Video | Audio | Native Source |
-|-----------|-----------|-------|-------|---------------|
-| MP4 | `.mp4` | H.264, AV1 | AAC | ✓ |
-| WebM | `.webm` | VP9, AV1 | Opus | ✓ |
-| M4A | `.m4a` | — | AAC | ✓ |
-
-### Require Conversion (via FFmpeg)
-
-| Container | Extension | Codec |
-|-----------|-----------|-------|
-| MKV | `.mkv` | Matroska |
-| AVI | `.avi` | AVI |
-| MOV | `.mov` | QuickTime |
-| MP3 | `.mp3` | MPEG Audio |
-| AAC | `.aac` | AAC |
-| FLAC | `.flac` | FLAC |
-| OGG | `.ogg` | Ogg Vorbis |
-| WAV | `.wav` | WAV |
-
-When requesting a container that requires conversion, yt-direct throws a `FormatError` with a clear message. Use `merge` to convert:
+#### DownloadResult
 
 ```javascript
-const video = await ytdl(url, {
-  quality: '1080p',
-  format: 'mkv',
-  merge: { tool: 'ffmpeg' },   // auto-detect ffmpeg
-});
-
-await video.merge('./output.mkv');
+{
+  path: '/tmp/video.mp4',
+  size: 26455880,          // bytes
+  statusCode: 206,          // HTTP status from CDN
+  time: 3120,               // download time in ms
+  speed: 8.1,               // MB/s
+}
 ```
 
 ---
 
-## Quality Reference
+## Download URL Only (no download)
 
-| Quality | Resolution | Typical Bitrate (Video) |
-|---------|-----------|----------------------|
-| 4320p | 7680×4320 | 40–80 Mbps |
-| 2160p | 3840×2160 | 20–45 Mbps |
-| 1440p | 2560×1440 | 10–20 Mbps |
-| 1080p | 1920×1080 | 5–12 Mbps |
-| 720p | 1280×720 | 2.5–6 Mbps |
-| 480p | 854×480 | 1–3 Mbps |
-| 360p | 640×360 | 0.5–1.5 Mbps |
-| 240p | 426×240 | 0.3–0.8 Mbps |
-| 144p | 256×144 | 0.1–0.4 Mbps |
-| audio | — | 32–256 Kbps |
+```javascript
+const video = await ytdl('https://www.youtube.com/watch?v=xxx', {
+  quality: '1080p',
+});
 
-Quality fallback: if the requested quality is unavailable, the next lower tier is tried automatically.
+console.log('Video URL:', video.url);
+if (video.audio) console.log('Audio URL:', video.audio.url);
+```
+
+---
+
+## Streaming
+
+```javascript
+const video = await ytdl(url, { quality: '720p' });
+video.pipe(fs.createWriteStream('./video.mp4'));
+```
+
+---
+
+## Merging Audio + Video
+
+1080p+ requires merging separate streams. yt-direct auto-detects: `ffmpeg`, `avconv`, `mkvmerge`, `gstreamer`.
+
+```javascript
+const video = await ytdl(url, {
+  quality: '2160p',
+  format: 'mp4',
+  merge: {
+    tool: 'ffmpeg',          // auto-detect from PATH
+    path: '/usr/bin/ffmpeg', // or specify custom path
+  },
+});
+
+const result = await video.merge('./output.mp4');
+console.log('Merged in', result.time, 'ms');
+```
 
 ---
 
@@ -138,41 +137,25 @@ Quality fallback: if the requested quality is unavailable, the next lower tier i
 ```javascript
 const audio = await ytdl(url, { quality: 'audio', format: 'm4a' });
 await audio.download('./audio.m4a');
-```
 
-For MP3 output:
-```javascript
-const audio = await ytdl(url, {
-  quality: 'audio',
-  format: 'mp3',
-  merge: { tool: 'ffmpeg' },
-});
+// MP3 requires conversion:
+const audio = await ytdl(url, { quality: 'audio', format: 'mp3', merge: { tool: 'ffmpeg' } });
 await audio.merge('./audio.mp3');
 ```
 
 ---
 
-## Merging Audio + Video
-
-For high-quality downloads (1080p+), YouTube provides separate video and audio streams. Use the `merge` option to combine them:
+## Custom Headers, Cookies & Timeout
 
 ```javascript
 const video = await ytdl(url, {
-  quality: '2160p',
-  format: 'mp4',
-  merge: {
-    tool: 'ffmpeg',          // or 'avconv'
-    path: '/usr/bin/ffmpeg', // optional custom path
-    output: './output.mp4',   // optional (auto-generated)
-  },
+  quality: '1080p',
+  headers: { 'X-Forwarded-For': '1.2.3.4' },
+  cookies: { 'CONSENT': 'YES+1' },
+  timeout: 60000,
+  retries: 5,
 });
-
-await video.merge();
 ```
-
-If format conversion is needed (e.g., mp4 → mkv), yt-direct prompts you with:
-
-> *Format "mkv" requires a merge/convert tool. Use { merge: { tool: "ffmpeg", output: "file.mkv" } }.*
 
 ---
 
@@ -182,23 +165,19 @@ If format conversion is needed (e.g., mp4 → mkv), yt-direct prompts you with:
 const info = await ytdl.getInfo('https://youtube.com/watch?v=xxx');
 
 console.log(info.title);
-console.log(info.formats);      // all available formats
-console.log(info.combined);     // audio+video formats
-console.log(info.adaptive);     // separate audio/video streams
+console.log(info.formats);   // [{ itag, quality, container, codec, size, type, hasUrl }]
+console.log(info.combined);  // audio+video formats
+console.log(info.adaptive);  // separate audio/video
+console.log(info.clientUsed); // 'ANDROID' or 'ANDROID_VR'
 ```
 
 ---
 
-## Streaming / Piping
+## Verify URL
 
 ```javascript
-const fs = require('node:fs');
-const video = await ytdl(url, { quality: '720p' });
-video.pipe(fs.createWriteStream('./video.mp4'));
-
-// Or use stream()
-const stream = video.stream();
-stream.pipe(fs.createWriteStream('./video.mp4'));
+const ok = await ytdl.verifyURL(url);
+console.log(ok); // true if CDN returns 200/206
 ```
 
 ---
@@ -206,64 +185,71 @@ stream.pipe(fs.createWriteStream('./video.mp4'));
 ## Error Handling
 
 ```javascript
-const { FormatError, ValidationError, YouTubeError } = ytdl;
+const { YouTubeError, FormatError, ValidationError, QualityError, MergeError, NetworkError } = ytdl;
 
 try {
   await ytdl(url, { format: 'mp3' });
 } catch (err) {
   if (err instanceof FormatError) {
-    console.log('Format unavailable:', err.message);
-    // err.details contains resolution info
-  } else if (err instanceof ValidationError) {
-    console.log('Invalid options:', err.message);
-  } else {
-    console.log('YouTube error:', err.message);
+    console.log('Requires conversion:', err.details);
   }
 }
 ```
 
 ---
 
-## Available Formats & Qualities
+## Format Support
 
-```javascript
-console.log('Formats:', ytdl.FORMATS);
-console.log('Qualities:', ytdl.QUALITIES);
-```
+### Native (direct from YouTube)
 
-**Formats:** `mp4`, `webm`, `mkv`, `avi`, `mov`, `m4a`, `aac`, `flac`, `ogg`, `mp3`, `wav`
+| Container | Extension | Video Codecs | Audio |
+|-----------|-----------|-------------|-------|
+| MP4 | `.mp4` | H.264, AV1 | AAC |
+| WebM | `.webm` | VP9, AV1 | Opus |
+| M4A | `.m4a` | — | AAC |
 
-**Qualities:** `4320p`, `2160p`, `1440p`, `1080p`, `720p`, `480p`, `360p`, `240p`, `144p`, `auto`, `best`, `audio`
+### Require Conversion (merge tool needed)
+
+| Container | Extension |
+|-----------|-----------|
+| MKV | `.mkv` |
+| AVI | `.avi` |
+| MOV | `.mov` |
+| MP3 | `.mp3` |
+| AAC | `.aac` |
+| FLAC | `.flac` |
+| OGG | `.ogg` |
+| WAV | `.wav` |
 
 ---
 
-## Getting the Download URL (without downloading)
+## Quality Reference
+
+| Quality | Resolution | Bitrate |
+|---------|-----------|---------|
+| 4320p | 7680×4320 | 40–80 Mbps |
+| 2160p | 3840×2160 | 20–45 Mbps |
+| 1440p | 2560×1440 | 10–20 Mbps |
+| 1080p | 1920×1080 | 5–12 Mbps |
+| 720p | 1280×720 | 2.5–6 Mbps |
+| 480p | 854×480 | 1–3 Mbps |
+| 360p | 640×360 | 0.5–1.5 Mbps |
+| audio | — | 32–256 Kbps |
+
+Fallback: if requested quality is unavailable, next lower tier is tried automatically.
+
+---
+
+## Available Constants
 
 ```javascript
-const ytdl = require('yt-direct');
-
-(async () => {
-  const video = await ytdl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
-    quality: '1080p',
-  });
-
-  console.log('Title:', video.title);
-  console.log('Video URL:', video.url);
-  if (video.audio) console.log('Audio URL:', video.audio.url);
-
-  // Use the URL directly with curl, wget, etc.
-})();
-```
-
-If you only need to inspect formats without selecting one:
-
-```javascript
-const info = await ytdl.getInfo('https://youtube.com/watch?v=xxx');
-console.log(info.formats);  // array of { itag, quality, container, codec, size, url }
+console.log('Formats:', ytdl.FORMATS);    // ['mp4','webm','mkv',...]
+console.log('Qualities:', ytdl.QUALITIES); // ['4320p','2160p',...,'auto','best','audio']
+console.log('Version:', ytdl.version);
 ```
 
 ---
 
 ## Requirements
 
-- Node.js 18+ (uses native fetch-compatible modules)
+- Node.js 18+

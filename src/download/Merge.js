@@ -6,26 +6,44 @@ const TOOLS = {
   ffmpeg: {
     cmd: 'ffmpeg',
     label: 'FFmpeg',
-    check: () => {
-      return new Promise((resolve) => {
-        const proc = spawn('ffmpeg', ['-version'], { stdio: 'ignore' });
-        proc.on('error', () => resolve(false));
-        proc.on('close', (code) => resolve(code === 0));
-      });
-    },
+    check: () => spawnCheck('ffmpeg', ['-version']),
   },
   avconv: {
     cmd: 'avconv',
     label: 'avconv (Libav)',
-    check: () => {
-      return new Promise((resolve) => {
-        const proc = spawn('avconv', ['-version'], { stdio: 'ignore' });
-        proc.on('error', () => resolve(false));
-        proc.on('close', (code) => resolve(code === 0));
-      });
-    },
+    check: () => spawnCheck('avconv', ['-version']),
+  },
+  mkvmerge: {
+    cmd: 'mkvmerge',
+    label: 'mkvmerge (MKVToolNix)',
+    check: () => spawnCheck('mkvmerge', ['--version']),
+    merge: (videoPath, audioPath, outputPath) => ({
+      cmd: 'mkvmerge',
+      args: ['-o', outputPath, videoPath, audioPath],
+    }),
+  },
+  gstreamer: {
+    cmd: 'gst-launch-1.0',
+    label: 'GStreamer',
+    check: () => spawnCheck('gst-launch-1.0', ['--version']),
+    merge: (videoPath, audioPath, outputPath) => ({
+      cmd: 'gst-launch-1.0',
+      args: [
+        'filesrc', `location=${videoPath}`, '!', 'qtdemux', '!', 'queue', '!',
+        'mux.', 'filesrc', `location=${audioPath}`, '!', 'qtdemux', '!', 'queue', '!',
+        'mux.', 'qtmux', 'name=mux', '!', 'filesink', `location=${outputPath}`,
+      ],
+    }),
   },
 };
+
+function spawnCheck(cmd, args) {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, args, { stdio: 'ignore' });
+    proc.on('error', () => resolve(false));
+    proc.on('close', (code) => resolve(code === 0));
+  });
+}
 
 async function detectTool(name) {
   if (name) {
@@ -36,7 +54,7 @@ async function detectTool(name) {
     return tool;
   }
 
-  for (const [key, tool] of Object.entries(TOOLS)) {
+  for (const tool of Object.values(TOOLS)) {
     if (await tool.check()) return tool;
   }
 
@@ -44,6 +62,7 @@ async function detectTool(name) {
 }
 
 function buildArgs(tool, videoPath, audioPath, outputPath) {
+  if (tool.merge) return tool.merge(videoPath, audioPath, outputPath);
   const cmd = tool.cmd || 'ffmpeg';
   return {
     cmd,
@@ -72,7 +91,7 @@ async function merge(videoPath, audioPath, outputPath, options = {}) {
 
   if (!tool) {
     throw new MergeError(
-      'No merge/conversion tool detected. Install FFmpeg (https://ffmpeg.org) or avconv. ' +
+      'No merge/conversion tool detected. Install FFmpeg (https://ffmpeg.org), avconv, mkvmerge, or gstreamer. ' +
       'Alternatively, use { merge: { path: "/path/to/ffmpeg" } } to specify a custom binary.'
     );
   }

@@ -1,11 +1,11 @@
 const { fetch } = require('./core/InnerTube');
 const { YouTubeError, FormatError, ValidationError, QualityError, MergeError, NetworkError } = require('./core/Errors');
 const { FormatSelector } = require('./formats/Selector');
-const { resolveContainer, requiresConversion, QUALITY_TIERS, CONTAINER_MAP } = require('./formats/Registry');
+const { QUALITY_TIERS, CONTAINER_MAP } = require('./formats/Registry');
 const { validateOptions } = require('./utils/validators');
 const { extractVideoId } = require('./utils/url');
 const { merge } = require('./download/Merge');
-const { downloadToFile, createReadStream, verify } = require('./download/Downloader');
+const { downloadToFile, verify } = require('./download/Downloader');
 const { createStream } = require('./download/Stream');
 const { VERSION } = require('./utils/constants');
 
@@ -15,61 +15,75 @@ function ytdl(input, options = {}) {
     return Promise.reject(new ValidationError(`Invalid YouTube URL or video ID: "${input}"`));
   }
 
-  const normalized = validateOptions(options);
+  const o = validateOptions(options);
 
   return (async () => {
+    const t0 = Date.now();
     const info = await getInfo(videoId);
     const selector = new FormatSelector(info.streamingData);
-    const selected = selector.select(normalized);
+    const selected = selector.select(o);
 
     const format = selected.format;
     const audio = selected.audio || null;
 
-    const response = {
+    const dopts = {
+      concurrency: o.concurrency,
+      timeout: o.timeout,
+      headers: o.headers,
+      cookies: o.cookies,
+      onProgress: o.onProgress,
+    };
+
+    const res = {
       videoId,
       title: info.title || 'video',
       url: format.url,
       format,
       audio,
       type: selected.type,
-      stream: () => createStream(format.url),
-      pipe: (writable) => createStream(format.url).pipe(writable),
-      download: async (filePath) => {
-        if (!filePath) {
-          const ext = normalized.format || format.container || 'mp4';
-          filePath = `${sanitize(info.title || 'video')}.${ext}`;
-        }
-        return downloadToFile(format.url, filePath, {
-          concurrency: normalized.concurrency,
-          onProgress: normalized.onProgress,
-        });
+      _infoTime: Date.now() - t0,
+
+      stream: () => createStream(format.url, dopts),
+      pipe: (w) => createStream(format.url, dopts).pipe(w),
+
+      download: async (fp) => {
+        if (!fp) fp = `${sanitize(info.title || 'video')}.${o.format || format.container || 'mp4'}`;
+        const result = await downloadToFile(format.url, fp, dopts);
+        return {
+          path: result.path,
+          size: result.size,
+          statusCode: result.code,
+          time: result.time,
+          speed: result.size > 0 && result.time > 0 ? Math.round((result.size / 1024 / 1024) / (result.time / 1000) * 10) / 10 : 0,
+        };
       },
     };
 
-    if (normalized.merge && audio) {
-      response.merge = async (outputPath) => {
-        if (!outputPath) {
-          const ext = normalized.format || 'mp4';
-          outputPath = `${sanitize(info.title || 'video')}.${ext}`;
-        }
+    if (o.merge && audio) {
+      res.merge = async (fp) => {
+        if (!fp) fp = `${sanitize(info.title || 'video')}.${o.format || 'mp4'}`;
         const fs = require('node:fs');
-        const tmpVideo = `/tmp/yt-direct-${format.itag}-video`;
-        const tmpAudio = `/tmp/yt-direct-${audio.itag}-audio`;
+        const tv = `/tmp/y-${format.itag}-v`;
+        const ta = `/tmp/y-${audio.itag}-a`;
         try {
+          const t0 = Date.now();
           await Promise.all([
-            downloadToFile(format.url, tmpVideo),
-            downloadToFile(audio.url, tmpAudio),
+            downloadToFile(format.url, tv, dopts),
+            downloadToFile(audio.url, ta, dopts),
           ]);
-          await merge(tmpVideo, tmpAudio, outputPath, normalized.merge);
-          return outputPath;
+          await merge(tv, ta, fp, o.merge);
+          return {
+            path: fp,
+            time: Date.now() - t0,
+          };
         } finally {
-          try { fs.unlinkSync(tmpVideo); } catch {}
-          try { fs.unlinkSync(tmpAudio); } catch {}
+          try { fs.unlinkSync(tv); } catch {}
+          try { fs.unlinkSync(ta); } catch {}
         }
       };
     }
 
-    return response;
+    return res;
   })();
 }
 
@@ -78,7 +92,7 @@ async function getInfo(input) {
   if (!videoId) throw new ValidationError(`Invalid YouTube URL or video ID: "${input}"`);
 
   const result = await fetch(videoId);
-  const selector = new FormatSelector(result.streamingData);
+  const sel = new FormatSelector(result.streamingData);
 
   return {
     id: videoId,
@@ -90,9 +104,9 @@ async function getInfo(input) {
     viewCount: parseInt(result.videoDetails.viewCount || '0', 10),
     isLive: result.videoDetails.isLive === true,
     streamingData: result.streamingData,
-    formats: selector.list(),
-    combined: selector.combined.map((f) => f.toJSON()),
-    adaptive: selector.adaptive.map((f) => f.toJSON()),
+    formats: sel.list(),
+    combined: sel.combined.map((f) => f.toJSON()),
+    adaptive: sel.adaptive.map((f) => f.toJSON()),
     clientUsed: result.clientUsed,
   };
 }
@@ -102,7 +116,7 @@ function sanitize(name) {
 }
 
 ytdl.getInfo = getInfo;
-ytdl.getFormats = (input) => getInfo(input).then((i) => i.formats);
+ytdl.getFormats = (i) => getInfo(i).then((r) => r.formats);
 ytdl.verifyURL = verify;
 ytdl.createStream = createStream;
 ytdl.version = VERSION;

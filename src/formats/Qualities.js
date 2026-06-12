@@ -23,7 +23,7 @@ function toHeight(label) {
 
 function matchQualityRank(format, targetHeight, tolerance = 72) {
   if (!targetHeight) return true;
-  const h = format.height || toHeight(format.qualityLabel);
+  const h = Math.min(format.height || 0, format.width || 0) || toHeight(format.qualityLabel);
   if (!h) return false;
   return Math.abs(h - targetHeight) <= tolerance;
 }
